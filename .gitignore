@@ -1,0 +1,52 @@
+# Dataset files (large files, not for git)
+dataset/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Output files (generated during runtime)
+output/
+*.json
+*.csv
+*.jsonl
+
+# Model files (too large for git)
+qwen_lora_finetuned/
+qwen_lora_output/
+*.bin
+*.safetensors
+*.pth
+*.ckpt
+
+# Virtual environment
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test files
+test_*.json
+*_test.py
+
+# Temporary files
+*.tmp
+*.bak
+

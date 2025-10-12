@@ -1,0 +1,42 @@
+# Human Feedback Active Learning Configuration
+
+# Model paths
+model:
+  base_model_path: "Qwen/Qwen-7B-Chat"
+  lora_path: "./qwen_lora_finetuned"
+
+# Data paths
+data:
+  test_set: "dataset/1600set.xlsx"
+  output_dir: "output"
+  target_smiles_file: "output/target_smiles.json"
+  unsure_smiles_file: "output/unsure_smiles.json"
+  feedback_history_file: "output/feedback_history.json"
+  predictions_file: "output/predictions.json"
+
+# Score prediction settings
+prediction:
+  score_min: 1
+  score_max: 10
+  max_length: 512
+  temperature: 0.7
+  top_p: 0.8
+  num_samples: 10  # Number of samples for uncertainty estimation
+
+# Confidence and score thresholds
+thresholds:
+  confidence_threshold: 8.0  # Confidence score threshold (0-10 scale)
+  target_score_threshold: 7.0  # Score threshold for target molecules
+  
+# Human feedback settings
+human_feedback:
+  num_pairs_per_round: 5  # Number of molecule pairs to show to human expert per round
+  max_rounds: 10  # Maximum number of feedback rounds
+  selection_strategy: "entropy"  # Strategy to select pairs: "entropy", "random", "margin"
+  
+# Active learning settings
+active_learning:
+  initial_prediction: true  # Predict all molecules initially
+  update_after_feedback: true  # Update predictions after each feedback round
+  use_feedback_for_training: false  # Whether to retrain model with feedback (future feature)
+
