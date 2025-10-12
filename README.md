@@ -83,31 +83,6 @@ prediction:
   num_samples: 10                # Samples per molecule (affects confidence)
 ```
 
-## 📊 Workflow
-
-### Training Module
-```
-smiles-data.xlsx → prepare_training_data.py → train_data.jsonl 
-→ lora_finetuning.py → qwen_lora_finetuned/ → inference.py
-```
-
-### Active Learning Module
-```
-1600set.xlsx → Predict all molecules → Calculate confidence
-↓
-Classify:
-  - High confidence + High score → target_smiles.json
-  - Low confidence → unsure_smiles.json
-↓
-Human Feedback Loop (max 10 rounds):
-  - Show 5 pairs of uncertain molecules
-  - Expert judges which has higher score
-  - Re-predict uncertain molecules
-  - Update classification
-↓
-Final results in output/
-```
-
 ## 🎯 Human Feedback Interface
 
 When prompted, choose:
@@ -146,44 +121,24 @@ num_pairs_per_round: 3  # Reduce from 5
 num_samples: 20  # Increase from 10
 ```
 
-## 🐛 Troubleshooting
-
-**Test failed?**
-```bash
-python3 test_pipeline.py  # Shows missing dependencies
-```
-
-**GPU memory error?**
-- Reduce `batch_size` in `lora_finetuning.py`
-- Reduce `num_samples` in `config.yaml`
-
-**All confidence scores low?**
-- Increase `num_samples` to 15-20
-- Check model training quality
-
 ## 📦 Requirements
 
 - Python 3.10+
 - GPU with 16GB+ memory (for Qwen 7B)
-- See `requirements.txt` for packages
+- See `requirements.txt` for all dependencies
 
-## 📊 Technical Details
-
-**Confidence Calculation**: Based on entropy of prediction distribution
-- 10 predictions same → entropy=0 → confidence=10 (very certain)
-- 10 predictions spread → entropy=max → confidence=0 (very uncertain)
-
-**Model**: Qwen 7B with LoRA finetuning
-**Training Data**: 301 SMILES structures with scores
-**Test Set**: 12,276 molecules
-
-## 🎉 That's It!
+## 🎉 Simple Workflow
 
 ```bash
-# Simple workflow:
-python3 test_pipeline.py           # Verify setup
-python3 lora_finetuning.py         # Train (optional if model exists)
-python3 active_learning_pipeline.py # Run pipeline
+# 1. Test environment
+python3 test_pipeline.py
+
+# 2. Train model (optional if model exists)
+python3 lora_finetuning.py
+
+# 3. Run active learning pipeline
+python3 active_learning_pipeline.py
 ```
 
 Results saved in `output/` directory. Enjoy! 🚀
+
