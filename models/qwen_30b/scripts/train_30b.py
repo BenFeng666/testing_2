@@ -1,13 +1,18 @@
 """
-LoRA Finetuning script for Qwen 7B model with SMILES drug discovery data
+LoRA Finetuning script for Qwen3-30B model with SMILES drug discovery data
+Optimized for 30B parameter models with memory efficiency
 """
 
 import json
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer
-from peft import LoraConfig, get_peft_model, TaskType
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, BitsAndBytesConfig
+from peft import LoraConfig, get_peft_model, TaskType, prepare_model_for_kbit_training
 from datasets import Dataset
 import os
+import sys
+
+# Add parent directory to path for imports
+sys.path.append(os.path.join(os.path.dirname(__file__), '../../..'))
 
 class SMILESDataset:
     """Dataset class for SMILES molecular data"""
@@ -56,28 +61,28 @@ class SMILESDataset:
         return Dataset.from_list(processed)
 
 def setup_lora_config():
-    """Configure LoRA parameters"""
+    """Configure LoRA parameters for 30B model"""
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         inference_mode=False,
-        r=8,  # LoRA rank
-        lora_alpha=32,  # LoRA alpha parameter
-        lora_dropout=0.1,  # Dropout probability
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],  # Qwen2 modules
+        r=16,  # Higher rank for larger model
+        lora_alpha=32,
+        lora_dropout=0.05,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
     )
     return lora_config
 
 def train_model(
-    model_name="Qwen/Qwen-7B-Chat",
-    train_data_path="dataset/train_data.jsonl",
-    output_dir="./qwen_lora_output",
+    model_name="Qwen/Qwen3-30B-A3B-Instruct-2507",
+    train_data_path="../../../data/train_data.jsonl",
+    output_dir="../checkpoints/qwen_30b_lora_finetuned",
     num_epochs=3,
-    batch_size=4,
-    learning_rate=2e-4,
+    batch_size=1,
+    learning_rate=1e-4,
     max_length=512
 ):
     """
-    Finetune Qwen 7B model with LoRA on SMILES data
+    Finetune Qwen3-30B model with LoRA on SMILES data
     
     Args:
         model_name: HuggingFace model name or local path
@@ -90,31 +95,38 @@ def train_model(
     """
     
     print(f"Loading tokenizer and model: {model_name}")
+    print("Model size: 30B+ parameters - Using 4-bit quantization for memory efficiency")
     
-    # Load tokenizer with revision to avoid stream_generator issue
+    # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
         trust_remote_code=True,
         padding_side='right',
-        revision="main"
     )
     
     # Set padding token if not set
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
-    # Load model with 8-bit quantization to save memory
+    # Configure 4-bit quantization for 30B model
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=True,
+    )
+    
+    # Load model with 4-bit quantization
+    print("Loading model with 4-bit quantization...")
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         trust_remote_code=True,
         device_map="auto",
-        load_in_8bit=True,  # Use 8-bit quantization to reduce memory
-        torch_dtype=torch.bfloat16,
+        quantization_config=bnb_config,
         low_cpu_mem_usage=True,
     )
     
     # Prepare model for kbit training
-    from peft import prepare_model_for_kbit_training
     model = prepare_model_for_kbit_training(model)
     
     # Apply LoRA configuration
@@ -129,23 +141,24 @@ def train_model(
     train_dataset = dataset_loader.preprocess_data()
     print(f"Training samples: {len(train_dataset)}")
     
-    # Training arguments - optimized for memory
+    # Training arguments - optimized for 30B model
     training_args = TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=num_epochs,
-        per_device_train_batch_size=1,  # Reduced to 1 to save memory
-        gradient_accumulation_steps=16,  # Increased to maintain effective batch size
+        per_device_train_batch_size=batch_size,
+        gradient_accumulation_steps=32,  # Larger for 30B
         learning_rate=learning_rate,
-        fp16=False,  # Disabled due to 8-bit quantization
-        bf16=True,  # Use bfloat16 instead
+        fp16=False,
+        bf16=True,
         save_strategy="epoch",
         logging_steps=5,
         warmup_steps=20,
-        optim="paged_adamw_8bit",  # Use 8-bit optimizer to save memory
+        optim="paged_adamw_8bit",
         save_total_limit=2,
         report_to="none",
-        gradient_checkpointing=True,  # Enable gradient checkpointing
+        gradient_checkpointing=True,
         max_grad_norm=0.3,
+        logging_dir=f"{output_dir}/logs",
     )
     
     # Initialize trainer
@@ -153,11 +166,12 @@ def train_model(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
     )
     
     # Start training
-    print("Starting training...")
+    print("Starting training for Qwen2-32B...")
+    print("Note: 30B model training will take longer than 7B")
     trainer.train()
     
     # Save the final model
@@ -168,14 +182,14 @@ def train_model(
     print("Training completed!")
 
 if __name__ == "__main__":
-    # Configuration
+    # Configuration for Qwen3-30B
     config = {
-        "model_name": "Qwen/Qwen2-7B-Instruct",  # Using Qwen2 for better compatibility
-        "train_data_path": "data/train_data.jsonl",
-        "output_dir": "./qwen_lora_finetuned",
+        "model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+        "train_data_path": "../../../data/train_data.jsonl",
+        "output_dir": "../checkpoints/qwen_30b_lora_finetuned",
         "num_epochs": 3,
-        "batch_size": 4,
-        "learning_rate": 2e-4,
+        "batch_size": 1,
+        "learning_rate": 1e-4,
         "max_length": 512
     }
     

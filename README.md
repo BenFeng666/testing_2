@@ -39,6 +39,47 @@ python3 active_learning_pipeline.py
 
 ## 📁 File Structure
 
+### Qwen Model Training (NEW - Organized Structure)
+
+**Location**: `models/` directory contains separate configurations for 7B and 30B models.
+
+#### Qwen2-7B Model ✅ (Completed)
+- **Location**: `models/qwen_7b/`
+- **Scripts**: 
+  - `train_7b.py` - Training script (8-bit quantization)
+  - `evaluate_7b.py` - Evaluation script
+  - `train_job_7b.sh` - SLURM job script for training (1x H100 GPU)
+  - `evaluate_job_7b.sh` - SLURM job script for evaluation
+- **Results**: Accuracy 53.5% (±1 error allowed), exact match 23.9% in round 1.
+- **Model**: Saved in `checkpoints/qwen_lora_finetuned/` (78MB)
+
+#### Qwen3-30B Model 🔄 (In Progress)
+- **Location**: `models/qwen_30b/`
+- **Scripts**:
+  - `train_30b.py` - Training script (4-bit NF4 quantization)
+  - `evaluate_30b.py` - Evaluation script
+  - `train_job_30b.sh` - SLURM job script for training (2x A100 GPUs)
+  - `evaluate_job_30b.sh` - SLURM job script for evaluation
+- **Expected**: Better accuracy than 7B model
+
+**Quick Usage**:
+```bash
+# Train 7B model
+cd models/qwen_7b/scripts && sbatch train_job_7b.sh
+
+# Train 30B model
+cd models/qwen_30b/scripts && sbatch train_job_30b.sh
+
+# Evaluate models (after training)
+sbatch evaluate_job_7b.sh  # or evaluate_job_30b.sh
+```
+
+**Shared Data**: Both models use `data/train_data.jsonl` (200) and `data/test_data.jsonl` (1000)
+
+**Documentation**: See `README_MODELS.md` for detailed model comparison and usage.
+
+---
+
 ### Core Scripts
 
 | File | Description |

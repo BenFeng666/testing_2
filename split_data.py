@@ -7,13 +7,14 @@ import numpy as np
 import os
 import json
 
-def split_data(input_file, output_dir, test_size=100):
+def split_data(input_file, output_dir, train_size=200, test_size=1000):
     """
     Load data, shuffle, and split into train/test sets
     
     Args:
         input_file: Path to input Excel file
         output_dir: Directory to save split data
+        train_size: Number of samples for training set
         test_size: Number of samples for test set
     """
     print(f"Loading data from: {input_file}")
@@ -42,6 +43,17 @@ def split_data(input_file, output_dir, test_size=100):
     
     print(f"\nCleaned data: {len(df_clean)} samples")
     
+    # Normalize scores to 1-10 integer range
+    min_score = df_clean['Score'].min()
+    max_score = df_clean['Score'].max()
+    print(f"\nOriginal score range: [{min_score:.2f}, {max_score:.2f}]")
+    
+    # Linear mapping to 1-10 range and round to integer
+    df_clean['Score'] = ((df_clean['Score'] - min_score) / (max_score - min_score) * 9 + 1).round().astype(int)
+    
+    print(f"Normalized score range: [1, 10]")
+    print(f"Score distribution:\n{df_clean['Score'].value_counts().sort_index()}")
+    
     # Shuffle the data
     print(f"Shuffling data with random seed 42...")
     df_shuffled = df_clean.sample(frac=1, random_state=42).reset_index(drop=True)
@@ -49,19 +61,19 @@ def split_data(input_file, output_dir, test_size=100):
     # Split into train and test
     total_samples = len(df_shuffled)
     
-    if test_size >= total_samples:
-        print(f"\nWarning: Test size ({test_size}) >= total samples ({total_samples})")
-        print(f"Setting test size to {total_samples // 2}")
-        test_size = total_samples // 2
-    
-    train_size = total_samples - test_size
+    if train_size + test_size > total_samples:
+        print(f"\nWarning: Train ({train_size}) + Test ({test_size}) > total samples ({total_samples})")
+        print(f"Adjusting to use available samples...")
+        train_size = min(train_size, total_samples // 2)
+        test_size = min(test_size, total_samples - train_size)
     
     print(f"\nSplitting data:")
     print(f"  Training set: {train_size} samples")
     print(f"  Test set: {test_size} samples")
+    print(f"  Total samples: {total_samples}")
     
     df_train = df_shuffled[:train_size]
-    df_test = df_shuffled[train_size:]
+    df_test = df_shuffled[train_size:train_size + test_size]
     
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
@@ -144,12 +156,13 @@ def split_data(input_file, output_dir, test_size=100):
 
 if __name__ == "__main__":
     # Configuration
-    input_file = "dataset/data_new.xlsx"
-    output_dir = "data_An"
-    test_size = 100  # Number of test samples
+    input_file = "data/data_new.xlsx"
+    output_dir = "data"
+    train_size = 200  # Number of training samples for finetuning
+    test_size = 1000  # Number of test samples
     
     # Run split
-    df_train, df_test = split_data(input_file, output_dir, test_size)
+    df_train, df_test = split_data(input_file, output_dir, train_size, test_size)
     
     # Show sample from each set
     print(f"\nSample from training set:")

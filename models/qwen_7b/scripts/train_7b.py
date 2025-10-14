@@ -168,13 +168,13 @@ def train_model(
     print("Training completed!")
 
 if __name__ == "__main__":
-    # Configuration
+    # Configuration for Qwen2-7B
     config = {
-        "model_name": "Qwen/Qwen2-7B-Instruct",  # Using Qwen2 for better compatibility
-        "train_data_path": "data/train_data.jsonl",
-        "output_dir": "./qwen_lora_finetuned",
+        "model_name": "Qwen/Qwen2-7B-Instruct",
+        "train_data_path": "../../../data/train_data.jsonl",
+        "output_dir": "../checkpoints/qwen_7b_lora_finetuned",
         "num_epochs": 3,
-        "batch_size": 4,
+        "batch_size": 1,
         "learning_rate": 2e-4,
         "max_length": 512
     }
