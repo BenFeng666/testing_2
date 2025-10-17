@@ -36,11 +36,11 @@ echo ""
 # =====================================================
 
 # ✅ Navigate to ChemLLM model directory
-cd /content/testing2/chemllm || exit 1
+cd /content/testing_2 || exit 1
 
 # ✅ Run the evaluation script
 echo "🚀 Starting ChemLLM evaluation..."
-python3 evaluate_chemllm.py
+python3 evaluate_model.py
 
 # =====================================================
 # End
