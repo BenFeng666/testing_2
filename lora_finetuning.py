@@ -1,5 +1,5 @@
 """
-LoRA Finetuning script for Qwen 7B model with SMILES drug discovery data
+LoRA Finetuning script for ChemLLM 7B model with SMILES drug discovery data
 """
 
 import json
@@ -9,6 +9,9 @@ from peft import LoraConfig, get_peft_model, TaskType
 from datasets import Dataset
 import os
 
+# =============================
+# 1. Dataset class
+# =============================
 class SMILESDataset:
     """Dataset class for SMILES molecular data"""
     
@@ -29,126 +32,114 @@ class SMILESDataset:
         """Format messages into a single string for training"""
         formatted = ""
         for msg in messages:
-            role = msg['role']
-            content = msg['content']
-            if role == 'system':
-                formatted += f"<|im_start|>system\n{content}<|im_end|>\n"
-            elif role == 'user':
-                formatted += f"<|im_start|>user\n{content}<|im_end|>\n"
-            elif role == 'assistant':
-                formatted += f"<|im_start|>assistant\n{content}<|im_end|>\n"
+            role = msg["role"]
+            content = msg["content"]
+            if role == "system":
+                formatted += f"### System:\n{content}\n"
+            elif role == "user":
+                formatted += f"### User:\n{content}\n"
+            elif role == "assistant":
+                formatted += f"### Assistant:\n{content}\n"
         return formatted
     
     def preprocess_data(self):
         """Preprocess data for training"""
         processed = []
         for item in self.data:
-            text = self.format_conversation(item['messages'])
+            text = self.format_conversation(item["messages"])
             encoded = self.tokenizer(
                 text,
                 max_length=self.max_length,
                 truncation=True,
-                padding='max_length',
+                padding="max_length",
                 return_tensors=None
             )
-            encoded['labels'] = encoded['input_ids'].copy()
+            encoded["labels"] = encoded["input_ids"].copy()
             processed.append(encoded)
         return Dataset.from_list(processed)
 
+
+# =============================
+# 2. LoRA configuration (ChemLLM/LLaMA style)
+# =============================
 def setup_lora_config():
-    """Configure LoRA parameters"""
-    lora_config = LoraConfig(
+    """Configure LoRA parameters for ChemLLM (Qwen-style)"""
+    return LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         inference_mode=False,
-        r=8,  # LoRA rank
-        lora_alpha=32,  # LoRA alpha parameter
-        lora_dropout=0.1,  # Dropout probability
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],  # Qwen2 modules
+        r=8,
+        lora_alpha=32,
+        lora_dropout=0.1,
+        target_modules=["c_attn", "c_proj", "w1", "w2","w3"],  # ✅ use Qwen-style layers
     )
-    return lora_config
 
+
+# =============================
+# 3. Training function
+# =============================
 def train_model(
-    model_name="Qwen/Qwen-7B-Chat",
+    model_name="AI4Chem/ChemLLM-7B-Chat",
     train_data_path="dataset/train_data.jsonl",
-    output_dir="./qwen_lora_output",
+    output_dir="./chemllm_lora_output",
     num_epochs=3,
     batch_size=4,
     learning_rate=2e-4,
     max_length=512
 ):
     """
-    Finetune Qwen 7B model with LoRA on SMILES data
-    
-    Args:
-        model_name: HuggingFace model name or local path
-        train_data_path: Path to training data JSONL file
-        output_dir: Directory to save the finetuned model
-        num_epochs: Number of training epochs
-        batch_size: Training batch size
-        learning_rate: Learning rate for training
-        max_length: Maximum sequence length
+    Finetune ChemLLM 7B model with LoRA on SMILES data
     """
     
     print(f"Loading tokenizer and model: {model_name}")
     
-    # Load tokenizer with revision to avoid stream_generator issue
+    # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
         trust_remote_code=True,
-        padding_side='right',
-        revision="main"
+        padding_side="right"
     )
     
-    # Set padding token if not set
+    # Set pad token if needed
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
-    # Load model with 8-bit quantization to save memory
+    # Load base model
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         trust_remote_code=True,
         device_map="auto",
-        load_in_8bit=True,  # Use 8-bit quantization to reduce memory
-        torch_dtype=torch.bfloat16,
-        low_cpu_mem_usage=True,
+        torch_dtype=torch.bfloat16,  # Use bf16 for A100
     )
     
-    # Prepare model for kbit training
-    from peft import prepare_model_for_kbit_training
-    model = prepare_model_for_kbit_training(model)
-    
-    # Apply LoRA configuration
+    # Apply LoRA config
     print("Applying LoRA configuration...")
     lora_config = setup_lora_config()
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
     
-    # Prepare dataset
+    # Load dataset
     print(f"Loading training data from: {train_data_path}")
     dataset_loader = SMILESDataset(train_data_path, tokenizer, max_length)
     train_dataset = dataset_loader.preprocess_data()
     print(f"Training samples: {len(train_dataset)}")
     
-    # Training arguments - optimized for memory
+    # Training arguments
     training_args = TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=num_epochs,
-        per_device_train_batch_size=1,  # Reduced to 1 to save memory
-        gradient_accumulation_steps=16,  # Increased to maintain effective batch size
+        per_device_train_batch_size=batch_size,
+        gradient_accumulation_steps=4,
         learning_rate=learning_rate,
-        fp16=False,  # Disabled due to 8-bit quantization
-        bf16=True,  # Use bfloat16 instead
+        bf16=True,  # better for A100
         save_strategy="epoch",
-        logging_steps=5,
-        warmup_steps=20,
-        optim="paged_adamw_8bit",  # Use 8-bit optimizer to save memory
-        save_total_limit=2,
+        logging_steps=10,
+        warmup_steps=100,
+        optim="adamw_torch",
+        save_total_limit=3,
         report_to="none",
-        gradient_checkpointing=True,  # Enable gradient checkpointing
-        max_grad_norm=0.3,
     )
     
-    # Initialize trainer
+    # Trainer
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -160,25 +151,27 @@ def train_model(
     print("Starting training...")
     trainer.train()
     
-    # Save the final model
+    # Save final adapter
     print(f"Saving model to: {output_dir}")
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
-    
-    print("Training completed!")
+    print("✅ Training completed successfully!")
 
+
+# =============================
+# 4. Run training
+# =============================
 if __name__ == "__main__":
-    # Configuration
     config = {
-        "model_name": "Qwen/Qwen2-7B-Instruct",  # Using Qwen2 for better compatibility
-        "train_data_path": "data/train_data.jsonl",
-        "output_dir": "./qwen_lora_finetuned",
+        "model_name": "AI4Chem/ChemLLM-7B-Chat",
+        "train_data_path": "dataset/train_data.jsonl",
+        "output_dir": "./chemllm_lora_output",
         "num_epochs": 3,
         "batch_size": 4,
         "learning_rate": 2e-4,
         "max_length": 512
     }
     
-    # Train the model
     train_model(**config)
+
 
