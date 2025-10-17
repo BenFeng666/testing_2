@@ -1,6 +1,5 @@
 """
-LoRA Finetuning script for Qwen 7B model - Using data_An dataset
-Train on 1100 samples, evaluate on 100 test samples
+LoRA Finetuning Script for ChemLLM-7B model using SMILES molecular dataset
 """
 
 import json
@@ -9,6 +8,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments,
 from peft import LoraConfig, get_peft_model, TaskType
 from datasets import Dataset
 import os
+
+# =====================================================
+# Dataset Class
+# =====================================================
 
 class SMILESDataset:
     """Dataset class for SMILES molecular data"""
@@ -56,33 +59,40 @@ class SMILESDataset:
             processed.append(encoded)
         return Dataset.from_list(processed)
 
+# =====================================================
+# LoRA Config
+# =====================================================
+
 def setup_lora_config():
     """Configure LoRA parameters"""
-    lora_config = LoraConfig(
+    return LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         inference_mode=False,
-        r=8,  # LoRA rank
-        lora_alpha=32,  # LoRA alpha parameter
-        lora_dropout=0.1,  # Dropout probability
-        target_modules=["c_attn", "c_proj", "w1", "w2"],  # Qwen specific modules
+        r=8,
+        lora_alpha=32,
+        lora_dropout=0.1,
+        target_modules=["c_attn", "c_proj", "w1", "w2", "w3"],  # ChemLLM / Qwen1.5 compatible
     )
-    return lora_config
+
+# =====================================================
+# Training Function
+# =====================================================
 
 def train_model(
-    model_name="Qwen/Qwen-7B-Chat",
-    train_data_path="data_An/train_data.jsonl",
-    output_dir="./qwen_lora_finetuned_An",
+    model_name="AI4Chem/ChemLLM-7B-Chat",
+    train_data_path="/content/Sai_AI4Drug/models/models/chemllm/dataset/train_data.jsonl",
+    output_dir="/content/Sai_AI4Drug/models/models/chemllm/chemllm_lora_output",
     num_epochs=3,
-    batch_size=4,
+    batch_size=2,
     learning_rate=2e-4,
     max_length=512
 ):
     """
-    Finetune Qwen 7B model with LoRA on SMILES data
+    Finetune ChemLLM-7B with LoRA on SMILES dataset
     """
-    
+
     print("="*80)
-    print("FINETUNING QWEN-7B WITH LORA ON data_An DATASET")
+    print("🚀 FINETUNING CHEMLLM-7B WITH LORA")
     print("="*80)
     print(f"Model: {model_name}")
     print(f"Training data: {train_data_path}")
@@ -91,62 +101,59 @@ def train_model(
     print(f"Batch size: {batch_size}")
     print(f"Learning rate: {learning_rate}")
     print("="*80)
-    
-    print(f"\nLoading tokenizer and model: {model_name}")
-    
+
     # Load tokenizer
+    print("\n🔡 Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
         trust_remote_code=True,
         padding_side='right'
     )
-    
-    # Set padding token if not set
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    
     print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}")
-    
+
     # Load model
-    print(f"Loading base model (this may take a few minutes)...")
+    print("\n🧠 Loading ChemLLM model (this may take a few minutes)...")
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         trust_remote_code=True,
         device_map="auto",
         torch_dtype=torch.float16,
     )
-    
-    print(f"Base model loaded successfully!")
-    
+    print("✅ Model loaded successfully!")
+
     # Apply LoRA configuration
-    print("\nApplying LoRA configuration...")
+    print("\n⚙️ Applying LoRA configuration...")
     lora_config = setup_lora_config()
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
-    
-    # Prepare dataset
-    print(f"\nLoading training data from: {train_data_path}")
+
+    # Load dataset
+    print(f"\n📂 Loading training data from: {train_data_path}")
     dataset_loader = SMILESDataset(train_data_path, tokenizer, max_length)
     train_dataset = dataset_loader.preprocess_data()
-    print(f"Training samples: {len(train_dataset)}")
-    
-    # Training arguments
+    print(f"✅ Training samples: {len(train_dataset)}")
+
+    # Training configuration
     training_args = TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=num_epochs,
         per_device_train_batch_size=batch_size,
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=8,
         learning_rate=learning_rate,
         fp16=True,
         save_strategy="epoch",
         logging_steps=10,
-        warmup_steps=100,
+        warmup_steps=50,
         optim="adamw_torch",
-        save_total_limit=3,
+        save_total_limit=2,
         report_to="none",
         remove_unused_columns=False,
+        gradient_checkpointing=True,
+        max_grad_norm=1.0,
     )
-    
+
     # Initialize trainer
     trainer = Trainer(
         model=model,
@@ -154,44 +161,31 @@ def train_model(
         train_dataset=train_dataset,
         tokenizer=tokenizer,
     )
-    
-    # Start training
-    print("\n" + "="*80)
-    print("STARTING TRAINING")
-    print("="*80)
+
+    print("\n🔥 Starting training...")
     trainer.train()
-    
-    # Save the final model
-    print(f"\n" + "="*80)
-    print(f"TRAINING COMPLETED")
-    print("="*80)
-    print(f"Saving model to: {output_dir}")
+
+    # Save model
+    print("\n💾 Saving model...")
+    os.makedirs(output_dir, exist_ok=True)
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
-    
-    print(f"\nModel and tokenizer saved successfully!")
-    print(f"You can now use this model for inference or evaluation.")
-    print("="*80)
+    print("✅ Training completed and model saved successfully!")
+
+# =====================================================
+# Main Entry
+# =====================================================
 
 if __name__ == "__main__":
-    # Configuration for data_An dataset
     config = {
-        "model_name": "Qwen/Qwen-7B-Chat",
-        "train_data_path": "data_An/train_data.jsonl",  # 1100 samples
-        "output_dir": "./qwen_lora_finetuned_An",
+        "model_name": "AI4Chem/ChemLLM-7B-Chat",
+        "train_data_path": "/content/Sai_AI4Drug/models/models/chemllm/dataset/train_data.jsonl",
+        "output_dir": "/content/Sai_AI4Drug/models/models/chemllm/chemllm_lora_output",
         "num_epochs": 3,
-        "batch_size": 4,
+        "batch_size": 2,
         "learning_rate": 2e-4,
         "max_length": 512
     }
-    
-    print("\n" + "="*80)
-    print("CONFIGURATION")
-    print("="*80)
-    for key, value in config.items():
-        print(f"{key}: {value}")
-    print("="*80)
-    
-    # Train the model
     train_model(**config)
+
 
