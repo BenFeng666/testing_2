@@ -78,9 +78,9 @@ def extract_score(response):
 # =====================================================
 
 def evaluate_model(
-    model_path="/content/Sai_AI4Drug/chemllm_lora_output",
+    model_path="/content/testing_2/chemllm_lora_output",
     base_model_name="AI4Chem/ChemLLM-7B-Chat",
-    test_data_path="/content/Sai_AI4Drug/dataset/testing.xlsx",
+    test_data_path="/content/testing_2/dataset/testing.xlsx",
     max_length=512
 ):
     print(f"🧠 Loading ChemLLM model from: {model_path}")
