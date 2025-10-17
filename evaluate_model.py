@@ -1,191 +1,197 @@
 """
-LoRA Finetuning Script for ChemLLM-7B model using SMILES molecular dataset
+Evaluate the fine-tuned ChemLLM-7B model on test data
 """
 
-import json
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer
-from peft import LoraConfig, get_peft_model, TaskType
-from datasets import Dataset
 import os
+import json
+import re
+import numpy as np
+import pandas as pd
+import torch
+from tqdm import tqdm
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from peft import PeftModel
+
 
 # =====================================================
-# 1. Dataset Class
+# Utility Functions
 # =====================================================
-class SMILESDataset:
-    """Dataset class for SMILES molecular data"""
-    
-    def __init__(self, jsonl_file, tokenizer, max_length=512):
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.data = self.load_data(jsonl_file)
-    
-    def load_data(self, jsonl_file):
-        """Load data from JSONL file"""
+
+def load_test_data(file_path):
+    """Load test data from either .jsonl or .xlsx"""
+    if file_path.endswith(".jsonl"):
+        print("📘 Detected JSONL file format")
         data = []
-        with open(jsonl_file, 'r', encoding='utf-8') as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             for line in f:
                 data.append(json.loads(line))
         return data
-    
-    def format_conversation(self, messages):
-        """Format messages into a single string for training"""
-        formatted = ""
-        for msg in messages:
-            role = msg["role"]
-            content = msg["content"]
-            if role == "system":
-                formatted += f"### System:\n{content}\n"
-            elif role == "user":
-                formatted += f"### User:\n{content}\n"
-            elif role == "assistant":
-                formatted += f"### Assistant:\n{content}\n"
-        return formatted
-    
-    def preprocess_data(self):
-        """Preprocess data for training"""
-        processed = []
-        for item in self.data:
-            text = self.format_conversation(item["messages"])
-            encoded = self.tokenizer(
-                text,
-                max_length=self.max_length,
-                truncation=True,
-                padding="max_length",
-                return_tensors=None,
-            )
-            input_ids = encoded["input_ids"]
-            attention_mask = encoded["attention_mask"]
 
-            # ✅ Mask out padding tokens for loss computation
-            labels = [
-                token if token != self.tokenizer.pad_token_id else -100
-                for token in input_ids
-            ]
-
-            processed.append({
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "labels": labels,
+    elif file_path.endswith(".xlsx"):
+        print("📗 Detected Excel file format — converting to message format...")
+        df = pd.read_excel(file_path)
+        if "Structure" not in df.columns or "Score" not in df.columns:
+            raise ValueError(f"❌ Missing required columns. Found: {df.columns.tolist()}")
+        df = df.dropna(subset=["Structure", "Score"])
+        data = []
+        for _, row in df.iterrows():
+            structure = str(row["Structure"])
+            score = row["Score"]
+            data.append({
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant specialized in drug discovery and molecular analysis. You can predict molecular scores based on their SMILES structures."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"What is the predicted score for this molecular structure: {structure}?"
+                    },
+                    {
+                        "role": "assistant",
+                        "content": f"The predicted score for the molecular structure {structure} is {score}."
+                    }
+                ]
             })
-        return Dataset.from_list(processed)
+        return data
+    else:
+        raise ValueError("❌ Unsupported test data format — use .jsonl or .xlsx")
+
+
+def extract_score(response):
+    """Extract a numerical score (1–10) from model output"""
+    match = re.search(r"\b([1-9]|10)\b", response)
+    if match:
+        return int(match.group(1))
+    return None
 
 
 # =====================================================
-# 2. LoRA Config
+# Evaluation Function
 # =====================================================
-def setup_lora_config():
-    """Configure LoRA parameters"""
-    return LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
-        inference_mode=False,
-        r=9,
-        lora_alpha=36,
-        lora_dropout=0.1,
-        target_modules=["c_attn", "c_proj", "w1", "w2", "w3"],  # Qwen/ChemLLM-style layers
-    )
 
-
-# =====================================================
-# 3. Training Function
-# =====================================================
-def train_model(
-    model_name="AI4Chem/ChemLLM-7B-Chat",
-    train_data_path="dataset/train_data.jsonl",
-    output_dir="./chemllm_lora_output",
-    num_epochs=50,
-    batch_size=2,
-    learning_rate=2e-4,
+def evaluate_model(
+    model_path="/content/testing_2/chemllm_lora_output",
+    base_model_name="AI4Chem/ChemLLM-7B-Chat",
+    test_data_path="/content/testing_2/dataset/testing.xlsx",
     max_length=512
 ):
-    """
-    Finetune ChemLLM-7B model with LoRA on SMILES dataset
-    """
+    print(f"🧠 Loading ChemLLM model from: {model_path}")
 
-    print(f"\n🔹 Loading tokenizer and model: {model_name}\n")
-
-    # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
-        model_name,
-        trust_remote_code=True,
-        padding_side="right"
-    )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    # Load base model
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        trust_remote_code=True,
-        device_map="auto",
-        torch_dtype=torch.bfloat16,  # A100-friendly
+        base_model_name, trust_remote_code=True, padding_side="right"
     )
 
-    # Apply LoRA configuration
-    print("⚙️ Applying LoRA configuration...")
-    lora_config = setup_lora_config()
-    model = get_peft_model(model, lora_config)
-    model.enable_input_require_grads()   # ✅ Required for LoRA backprop
-    model.config.use_cache = False
-    model.train()
-    model.print_trainable_parameters()
-
-    # Load dataset
-    print(f"📘 Loading training data from: {train_data_path}")
-    dataset_loader = SMILESDataset(train_data_path, tokenizer, max_length)
-    train_dataset = dataset_loader.preprocess_data()
-    print(f"✅ Training samples: {len(train_dataset)}")
-
-    # Training Arguments
-    training_args = TrainingArguments(
-        output_dir=output_dir,
-        num_train_epochs=num_epochs,
-        per_device_train_batch_size=batch_size,
-        gradient_accumulation_steps=8,
-        learning_rate=learning_rate,
-        bf16=True,                                 # Use bf16 for better A100/H100 efficiency
-        save_strategy="epoch",                     # Save at each epoch
-        logging_steps=10,                          # Log every 10 steps
-        warmup_steps=100,                          # Gradual LR warm-up
-        lr_scheduler_type="cosine",                # Cosine learning rate schedule
-        optim="adamw_torch",                       # Standard AdamW optimizer
-        save_total_limit=2,                        # Keep only 2 most recent checkpoints
-        remove_unused_columns=False,               # Keep all columns (important for custom datasets)
-        gradient_checkpointing=True,               # Save memory during training
-        max_grad_norm=0.5,                         # Clip gradient norm
-        report_to="none"                           # Disable wandb/tensorboard logging
+    base_model = AutoModelForCausalLM.from_pretrained(
+        base_model_name, trust_remote_code=True, device_map="auto", torch_dtype=torch.float16
     )
 
-    # Trainer
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        tokenizer=tokenizer,
-    )
+    model = PeftModel.from_pretrained(base_model, model_path)
+    model.eval()
 
-    print("\n🔥 Starting training...\n")
-    trainer.train()
+    # Load test data
+    print(f"📄 Loading test data from: {test_data_path}")
+    test_data = load_test_data(test_data_path)
+    print(f"✅ Test samples: {len(test_data)}")
 
-    # Save the final adapter
-    print(f"\n💾 Saving model to: {output_dir}")
-    model.save_pretrained(output_dir)
-    tokenizer.save_pretrained(output_dir)
-    print("\n✅ Training completed successfully!\n")
+    predictions, ground_truths, errors = [], [], []
+    total, exact_matches = 0, 0
 
+    print("\n🚀 Running evaluation...")
+    for item in tqdm(test_data):
+        messages = item["messages"]
 
-# =====================================================
-# 4. Run Training
-# =====================================================
-if __name__ == "__main__":
-    config = {
-        "model_name": "AI4Chem/ChemLLM-7B-Chat",
-        "train_data_path": "dataset/train_data.jsonl",
-        "output_dir": "./chemllm_lora_output",
-        "num_epochs": 50,
-        "batch_size": 2,
-        "learning_rate": 2e-4,
-        "max_length": 512
+        assistant_msg = next((m for m in messages if m["role"] == "assistant"), None)
+        if not assistant_msg:
+            continue
+
+        true_score = extract_score(assistant_msg["content"])
+        if true_score is None:
+            continue
+
+        prompt = ""
+        for msg in messages:
+            if msg["role"] == "system":
+                prompt += f"<|im_start|>system\n{msg['content']}<|im_end|>\n"
+            elif msg["role"] == "user":
+                prompt += f"<|im_start|>user\n{msg['content']}<|im_end|>\n"
+                break
+        prompt += "<|im_start|>assistant\n"
+
+        inputs = tokenizer(prompt, return_tensors="pt", max_length=max_length, truncation=True)
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=64,
+                do_sample=False,
+                temperature=0.1,
+                top_p=0.9,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+
+        response = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+        pred_score = extract_score(response)
+
+        if pred_score is not None:
+            predictions.append(pred_score)
+            ground_truths.append(true_score)
+            if pred_score == true_score:
+                exact_matches += 1
+            total += 1
+        else:
+            errors.append({"true_score": true_score, "response": response})
+
+    # =====================================================
+    # Compute Metrics
+    # =====================================================
+    if total > 0:
+        predictions = np.array(predictions)
+        ground_truths = np.array(ground_truths)
+        mae = np.mean(np.abs(predictions - ground_truths))
+        rmse = np.sqrt(np.mean((predictions - ground_truths) ** 2))
+        within_1 = np.sum(np.abs(predictions - ground_truths) <= 1) / total * 100
+        accuracy = exact_matches / total * 100
+    else:
+        mae = rmse = float("nan")
+        within_1 = accuracy = 0
+
+    print(f"\n{'='*60}")
+    print("EVALUATION RESULTS - ChemLLM-7B")
+    print(f"{'='*60}")
+    print(f"Total samples evaluated: {total}")
+    print(f"Exact match accuracy: {accuracy:.2f}%")
+    print(f"Accuracy within ±1: {within_1:.2f}%")
+    print(f"MAE: {mae:.3f}")
+    print(f"RMSE: {rmse:.3f}")
+    print(f"Failed predictions: {len(errors)}")
+    print(f"{'='*60}")
+
+    os.makedirs("output", exist_ok=True)
+    results_file = "output/evaluation_results_chemllm.json"
+    with open(results_file, "w", encoding="utf-8") as f:
+        json.dump({
+            "total_samples": total,
+            "accuracy_exact": accuracy,
+            "accuracy_within_1": within_1,
+            "mae": float(mae),
+            "rmse": float(rmse),
+            "failed_predictions": len(errors),
+        }, f, indent=2, ensure_ascii=False)
+
+    print(f"\n💾 Results saved to: {results_file}")
+    return {
+        "total": total,
+        "accuracy": accuracy,
+        "within_1": within_1,
+        "mae": mae,
+        "rmse": rmse,
     }
 
-    train_model(**config)
+
+# =====================================================
+# Entry Point
+# =====================================================
+if __name__ == "__main__":
+    evaluate_model()
