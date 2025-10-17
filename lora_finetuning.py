@@ -1,5 +1,5 @@
 """
-LoRA Finetuning script for ChemLLM 7B model with SMILES drug discovery data
+LoRA Finetuning Script for ChemLLM-7B model using SMILES molecular dataset
 """
 
 import json
@@ -9,9 +9,9 @@ from peft import LoraConfig, get_peft_model, TaskType
 from datasets import Dataset
 import os
 
-# =============================
-# 1. Dataset class
-# =============================
+# =====================================================
+# 1. Dataset Class
+# =====================================================
 class SMILESDataset:
     """Dataset class for SMILES molecular data"""
     
@@ -52,93 +52,110 @@ class SMILESDataset:
                 max_length=self.max_length,
                 truncation=True,
                 padding="max_length",
-                return_tensors=None
+                return_tensors=None,
             )
-            encoded["labels"] = encoded["input_ids"].copy()
-            processed.append(encoded)
+            input_ids = encoded["input_ids"]
+            attention_mask = encoded["attention_mask"]
+
+            # ✅ Mask out padding tokens for loss computation
+            labels = [
+                token if token != self.tokenizer.pad_token_id else -100
+                for token in input_ids
+            ]
+
+            processed.append({
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": labels,
+            })
         return Dataset.from_list(processed)
 
 
-# =============================
-# 2. LoRA configuration (ChemLLM/LLaMA style)
-# =============================
+# =====================================================
+# 2. LoRA Config
+# =====================================================
 def setup_lora_config():
-    """Configure LoRA parameters for ChemLLM (Qwen-style)"""
+    """Configure LoRA parameters"""
     return LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         inference_mode=False,
         r=8,
         lora_alpha=32,
-        lora_dropout=0.1,
-        target_modules=["c_attn", "c_proj", "w1", "w2","w3"],  # ✅ use Qwen-style layers
+        lora_dropout=0.05,
+        target_modules=["c_attn", "c_proj", "w1", "w2", "w3"],  # Qwen/ChemLLM-style layers
     )
 
 
-# =============================
-# 3. Training function
-# =============================
+# =====================================================
+# 3. Training Function
+# =====================================================
 def train_model(
     model_name="AI4Chem/ChemLLM-7B-Chat",
     train_data_path="dataset/train_data.jsonl",
     output_dir="./chemllm_lora_output",
-    num_epochs=3,
-    batch_size=4,
+    num_epochs=50,
+    batch_size=2,
     learning_rate=2e-4,
     max_length=512
 ):
     """
-    Finetune ChemLLM 7B model with LoRA on SMILES data
+    Finetune ChemLLM-7B model with LoRA on SMILES dataset
     """
-    
-    print(f"Loading tokenizer and model: {model_name}")
-    
+
+    print(f"\n🔹 Loading tokenizer and model: {model_name}\n")
+
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
         trust_remote_code=True,
         padding_side="right"
     )
-    
-    # Set pad token if needed
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    
+
     # Load base model
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         trust_remote_code=True,
         device_map="auto",
-        torch_dtype=torch.bfloat16,  # Use bf16 for A100
+        torch_dtype=torch.bfloat16,  # A100-friendly
     )
-    
-    # Apply LoRA config
-    print("Applying LoRA configuration...")
+
+    # Apply LoRA configuration
+    print("⚙️ Applying LoRA configuration...")
     lora_config = setup_lora_config()
     model = get_peft_model(model, lora_config)
+    model.enable_input_require_grads()   # ✅ Required for LoRA backprop
+    model.config.use_cache = False
+    model.train()
     model.print_trainable_parameters()
-    
+
     # Load dataset
-    print(f"Loading training data from: {train_data_path}")
+    print(f"📘 Loading training data from: {train_data_path}")
     dataset_loader = SMILESDataset(train_data_path, tokenizer, max_length)
     train_dataset = dataset_loader.preprocess_data()
-    print(f"Training samples: {len(train_dataset)}")
-    
-    # Training arguments
+    print(f"✅ Training samples: {len(train_dataset)}")
+
+    # Training Arguments
     training_args = TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=num_epochs,
         per_device_train_batch_size=batch_size,
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=8,
         learning_rate=learning_rate,
-        bf16=True,  # better for A100
-        save_strategy="epoch",
-        logging_steps=10,
-        warmup_steps=100,
-        optim="adamw_torch",
-        save_total_limit=3,
-        report_to="none",
+        bf16=True,                                 # Use bf16 for better A100/H100 efficiency
+        save_strategy="epoch",                     # Save at each epoch
+        logging_steps=10,                          # Log every 10 steps
+        warmup_steps=100,                          # Gradual LR warm-up
+        lr_scheduler_type="cosine",                # Cosine learning rate schedule
+        optim="adamw_torch",                       # Standard AdamW optimizer
+        save_total_limit=2,                        # Keep only 2 most recent checkpoints
+        remove_unused_columns=False,               # Keep all columns (important for custom datasets)
+        gradient_checkpointing=True,               # Save memory during training
+        max_grad_norm=0.5,                         # Clip gradient norm
+        report_to="none"                           # Disable wandb/tensorboard logging
     )
-    
+
     # Trainer
     trainer = Trainer(
         model=model,
@@ -146,32 +163,30 @@ def train_model(
         train_dataset=train_dataset,
         tokenizer=tokenizer,
     )
-    
-    # Start training
-    print("Starting training...")
+
+    print("\n🔥 Starting training...\n")
     trainer.train()
-    
-    # Save final adapter
-    print(f"Saving model to: {output_dir}")
+
+    # Save the final adapter
+    print(f"\n💾 Saving model to: {output_dir}")
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
-    print("✅ Training completed successfully!")
+    print("\n✅ Training completed successfully!\n")
 
 
-# =============================
-# 4. Run training
-# =============================
+# =====================================================
+# 4. Run Training
+# =====================================================
 if __name__ == "__main__":
     config = {
         "model_name": "AI4Chem/ChemLLM-7B-Chat",
         "train_data_path": "dataset/train_data.jsonl",
         "output_dir": "./chemllm_lora_output",
-        "num_epochs": 3,
-        "batch_size": 4,
+        "num_epochs": 70,
+        "batch_size": 2,
         "learning_rate": 2e-4,
         "max_length": 512
     }
-    
-    train_model(**config)
 
+    train_model(**config)
 
