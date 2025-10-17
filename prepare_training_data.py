@@ -11,7 +11,7 @@ def convert_smiles_to_training_format(input_file, output_file):
         output_file: Path to the output JSONL file
     """
     # Read the Excel file - skip first empty row, use row 1 as header
-    df = pd.read_excel(input_file, header=1)
+    df = pd.read_excel(input_file, header=0)
     
     # Check if required columns exist
     if 'Structure' not in df.columns or 'Score' not in df.columns:
