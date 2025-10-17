@@ -179,8 +179,8 @@ def train_model(
 if __name__ == "__main__":
     config = {
         "model_name": "AI4Chem/ChemLLM-7B-Chat",
-        "train_data_path": "/content/Sai_AI4Drug/models/models/chemllm/dataset/train_data.jsonl",
-        "output_dir": "/content/Sai_AI4Drug/models/models/chemllm/chemllm_lora_output",
+        "train_data_path": "/content/testing_2/train_data.jsonl",
+        "output_dir": "/content/testing_2/chemllm_lora_output",
         "num_epochs": 3,
         "batch_size": 2,
         "learning_rate": 2e-4,
