@@ -91,6 +91,19 @@ def test_confidence_calculator():
         print(f"    - Confidence: {result1['confidence']:.2f}")
         assert result1['confidence'] > 9.0, "High confidence should be > 9.0"
         
+        low_range = [0.12, 0.25, 0.55, 0.61, 0.49, 0.7, 0.9, 0.3, 0.8, 0.4]
+        result1 = calc.calculate_confidence_from_samples(low_range)
+        print(f"  low_range test:")
+        print(f"    - Score: {result1['mean_score']:.2f}")
+        print(f"    - Confidence: {result1['confidence']:.2f}")
+
+        identical = [0.5] * 10
+        result1 = calc.calculate_confidence_from_samples(identical)
+        print(f"  identical test:")
+        print(f"    - Score: {result1['mean_score']:.2f}")
+        print(f"    - Confidence: {result1['confidence']:.2f}")
+        
+        
         # Test low confidence
         low_conf = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         result2 = calc.calculate_confidence_from_samples(low_conf)
