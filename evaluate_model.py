@@ -1,55 +1,89 @@
 """
-Evaluate the fine-tuned ChemLLM-7B model on test data
+Evaluate the fine-tuned ChemLLM-7B LoRA model on test data
+with entropy-based confidence scoring.
+
+Outputs:
+  - output/scores.json
+  - output/confidence.json
+  - output/evaluation_summary.json
 """
 
 import os
-import json
 import re
+import json
 import numpy as np
 import pandas as pd
 import torch
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
+from confidence_calculator import ConfidenceCalculator
 
 
 # =====================================================
-# Utility Functions
+# CONFIGURATION
 # =====================================================
+BASE_MODEL = "AI4Chem/ChemLLM-7B-Chat"
+LORA_MODEL_PATH = "/content/testing_2/chemllm_lora_output"
+TEST_DATA_PATH = "/content/testing_2/dataset/testing.xlsx"
+OUTPUT_DIR = "output"
+
+NUM_SAMPLES = 10
+TEMPERATURE = 0.7
+TOP_P = 0.8
+MAX_LENGTH = 256
+SCORE_MIN, SCORE_MAX = 1, 12
+
+
+# =====================================================
+# UTILITIES
+# =====================================================
+def extract_score(response: str):
+    """Extract a numerical score (0–10 or decimal) from model output."""
+    if not response:
+        return None
+    text = str(response)
+
+    # Find the first floating-point or integer number
+    match = re.search(r"(?<![\d.])-?\d+(?:\.\d+)?(?!\d)", text)
+    if match:
+        try:
+            val = float(match.group(0))
+            return val
+        except ValueError:
+            return None
+    return None
+
 
 def load_test_data(file_path):
-    """Load test data from either .jsonl or .xlsx"""
+    """Load test data from .xlsx or .jsonl, return a list of message dicts."""
     if file_path.endswith(".jsonl"):
         print("📘 Detected JSONL file format")
-        data = []
         with open(file_path, "r", encoding="utf-8") as f:
-            for line in f:
-                data.append(json.loads(line))
-        return data
+            return [json.loads(line) for line in f]
 
     elif file_path.endswith(".xlsx"):
         print("📗 Detected Excel file format — converting to message format...")
         df = pd.read_excel(file_path)
-        if "Structure" not in df.columns or "Score" not in df.columns:
-            raise ValueError(f"❌ Missing required columns. Found: {df.columns.tolist()}")
-        df = df.dropna(subset=["Structure", "Score"])
+        if "Structure" not in df.columns:
+            raise ValueError(f"❌ Missing 'Structure' column. Found: {df.columns.tolist()}")
+        df = df.dropna(subset=["Structure"])
         data = []
         for _, row in df.iterrows():
             structure = str(row["Structure"])
-            score = row["Score"]
             data.append({
                 "messages": [
                     {
                         "role": "system",
-                        "content": "You are a helpful assistant specialized in drug discovery and molecular analysis. You can predict molecular scores based on their SMILES structures."
+                        "content": (
+                            "You are a helpful assistant specialized in drug discovery and "
+                            "molecular analysis. Respond only with a number. "
+                            "Do not include text, units, or explanations."
+                        )
                     },
                     {
                         "role": "user",
-                        "content": f"What is the predicted score for this molecular structure: {structure}?"
-                    },
-                    {
-                        "role": "assistant",
-                        "content": f"The predicted score for the molecular structure {structure} is {score}."
+                        "content": f"What is the predicted transfection efficiency score for this molecular structure: {structure}?"
                     }
                 ]
             })
@@ -58,140 +92,114 @@ def load_test_data(file_path):
         raise ValueError("❌ Unsupported test data format — use .jsonl or .xlsx")
 
 
-def extract_score(response):
-    """Extract a numerical score (1–10) from model output"""
-    match = re.search(r"\b([1-9]|10)\b", response)
-    if match:
-        return int(match.group(1))
-    return None
-
-
 # =====================================================
-# Evaluation Function
+# MAIN EVALUATION FUNCTION
 # =====================================================
+def evaluate_model():
+    print("🚀 Starting ChemLLM-7B LoRA evaluation (with confidence)...")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-def evaluate_model(
-    model_path="/content/testing_2/chemllm_lora_output",
-    base_model_name="AI4Chem/ChemLLM-7B-Chat",
-    test_data_path="/content/testing_2/dataset/testing.xlsx",
-    max_length=512
-):
-    print(f"🧠 Loading ChemLLM model from: {model_path}")
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        base_model_name, trust_remote_code=True, padding_side="right"
-    )
-
+    # Load base model and LoRA adapter
+    print(f"🧠 Loading base model: {BASE_MODEL}")
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True, padding_side="right")
     base_model = AutoModelForCausalLM.from_pretrained(
-        base_model_name, trust_remote_code=True, device_map="auto", torch_dtype=torch.float16
+        BASE_MODEL, trust_remote_code=True, device_map="auto", torch_dtype=torch.float16
     )
 
-    model = PeftModel.from_pretrained(base_model, model_path)
+    print(f"🔌 Attaching LoRA adapter: {LORA_MODEL_PATH}")
+    model = PeftModel.from_pretrained(base_model, LORA_MODEL_PATH)
     model.eval()
 
+    # Confidence calculator
+    conf_calc = ConfidenceCalculator(SCORE_MIN, SCORE_MAX)
+
     # Load test data
-    print(f"📄 Loading test data from: {test_data_path}")
-    test_data = load_test_data(test_data_path)
-    print(f"✅ Test samples: {len(test_data)}")
+    print(f"📄 Loading test data from: {TEST_DATA_PATH}")
+    test_data = load_test_data(TEST_DATA_PATH)
+    print(f"✅ Loaded {len(test_data)} molecules")
 
-    predictions, ground_truths, errors = [], [], []
-    total, exact_matches = 0, 0
+    all_scores = []
+    all_confidences = []
+    all_errors = []
 
-    print("\n🚀 Running evaluation...")
-    for item in tqdm(test_data):
+    # =====================================================
+    # Generate predictions
+    # =====================================================
+    for idx, item in enumerate(tqdm(test_data, desc="Predicting")):
         messages = item["messages"]
 
-        assistant_msg = next((m for m in messages if m["role"] == "assistant"), None)
-        if not assistant_msg:
-            continue
-
-        true_score = extract_score(assistant_msg["content"])
-        if true_score is None:
-            continue
-
-        prompt = ""
-        for msg in messages:
-            if msg["role"] == "system":
-                prompt += f"<|im_start|>system\n{msg['content']}<|im_end|>\n"
-            elif msg["role"] == "user":
-                prompt += f"<|im_start|>user\n{msg['content']}<|im_end|>\n"
-                break
-        prompt += "<|im_start|>assistant\n"
-
-        inputs = tokenizer(prompt, return_tensors="pt", max_length=max_length, truncation=True)
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
-
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=64,
-                do_sample=False,
-                temperature=0.1,
-                top_p=0.9,
-                pad_token_id=tokenizer.eos_token_id,
-            )
-
-        response = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-        pred_score = extract_score(response)
-
-        if pred_score is not None:
-            predictions.append(pred_score)
-            ground_truths.append(true_score)
-            if pred_score == true_score:
-                exact_matches += 1
-            total += 1
+        # ---- Plain text prompt (no ChatML) ----
+        if len(messages) > 1 and "content" in messages[1]:
+            user_prompt = messages[1]["content"]
         else:
-            errors.append({"true_score": true_score, "response": response})
+            user_prompt = "Predict the molecular transfection efficiency score for this structure."
+
+        system_prompt = (
+            "You are a helpful assistant specialized in drug discovery and molecular analysis. "
+            "Respond only with a number. Do not include any text or units.\n"
+        )
+
+        text = f"{system_prompt}\n{user_prompt}\nPredicted score:"
+
+        # ---- Generate multiple samples ----
+        sample_scores = []
+        for _ in range(NUM_SAMPLES):
+            inputs = tokenizer([text], return_tensors="pt").to(model.device)
+            with torch.no_grad():
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=32,
+                    do_sample=True,
+                    temperature=TEMPERATURE,
+                    top_p=TOP_P,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+
+            response = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+            print(response)
+            score = extract_score(response)
+            if score is not None:
+                sample_scores.append(score)
+
+        # ---- Compute mean score and confidence ----
+        if sample_scores:
+            conf_data = conf_calc.calculate_confidence_from_samples(sample_scores)
+            mean_score = conf_data["mean_score"]
+            confidence = conf_data["confidence"]
+        else:
+            mean_score, confidence = 0.0, 0.0
+            all_errors.append(idx)
+
+        all_scores.append(round(mean_score, 4))
+        all_confidences.append(round(confidence, 4))
 
     # =====================================================
-    # Compute Metrics
+    # Save results
     # =====================================================
-    if total > 0:
-        predictions = np.array(predictions)
-        ground_truths = np.array(ground_truths)
-        mae = np.mean(np.abs(predictions - ground_truths))
-        rmse = np.sqrt(np.mean((predictions - ground_truths) ** 2))
-        within_1 = np.sum(np.abs(predictions - ground_truths) <= 1) / total * 100
-        accuracy = exact_matches / total * 100
-    else:
-        mae = rmse = float("nan")
-        within_1 = accuracy = 0
+    scores_file = os.path.join(OUTPUT_DIR, "scores.json")
+    conf_file = os.path.join(OUTPUT_DIR, "confidence.json")
+    summary_file = os.path.join(OUTPUT_DIR, "evaluation_summary.json")
 
-    print(f"\n{'='*60}")
-    print("EVALUATION RESULTS - ChemLLM-7B")
-    print(f"{'='*60}")
-    print(f"Total samples evaluated: {total}")
-    print(f"Exact match accuracy: {accuracy:.2f}%")
-    print(f"Accuracy within ±1: {within_1:.2f}%")
-    print(f"MAE: {mae:.3f}")
-    print(f"RMSE: {rmse:.3f}")
-    print(f"Failed predictions: {len(errors)}")
-    print(f"{'='*60}")
-
-    os.makedirs("output", exist_ok=True)
-    results_file = "output/evaluation_results_chemllm.json"
-    with open(results_file, "w", encoding="utf-8") as f:
+    with open(scores_file, "w", encoding="utf-8") as f:
+        json.dump(all_scores, f, ensure_ascii=False)
+    with open(conf_file, "w", encoding="utf-8") as f:
+        json.dump(all_confidences, f, ensure_ascii=False)
+    with open(summary_file, "w", encoding="utf-8") as f:
         json.dump({
-            "total_samples": total,
-            "accuracy_exact": accuracy,
-            "accuracy_within_1": within_1,
-            "mae": float(mae),
-            "rmse": float(rmse),
-            "failed_predictions": len(errors),
-        }, f, indent=2, ensure_ascii=False)
+            "total_molecules": len(test_data),
+            "failed_predictions": len(all_errors),
+            "average_confidence": float(np.mean(all_confidences)) if all_confidences else 0.0
+        }, f, indent=2)
 
-    print(f"\n💾 Results saved to: {results_file}")
-    return {
-        "total": total,
-        "accuracy": accuracy,
-        "within_1": within_1,
-        "mae": mae,
-        "rmse": rmse,
-    }
+    print(f"\n💾 Saved {len(all_scores)} scores to: {scores_file}")
+    print(f"💾 Saved {len(all_confidences)} confidences to: {conf_file}")
+    print(f"💾 Summary saved to: {summary_file}")
+    print("✅ Evaluation completed successfully.")
 
 
 # =====================================================
-# Entry Point
+# ENTRY POINT
 # =====================================================
 if __name__ == "__main__":
     evaluate_model()
+
