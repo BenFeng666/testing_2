@@ -80,7 +80,7 @@ def setup_lora_config():
         task_type=TaskType.CAUSAL_LM,
         inference_mode=False,
         r=9,
-        lora_alpha=36,
+        lora_alpha=18,
         lora_dropout=0.1,
         target_modules=["c_attn", "c_proj", "w1", "w2", "w3"],  # Qwen/ChemLLM-style layers
     )
@@ -93,7 +93,7 @@ def train_model(
     model_name="AI4Chem/ChemLLM-7B-Chat",
     train_data_path="dataset/train_data.jsonl",
     output_dir="./chemllm_lora_output",
-    num_epochs=5,
+    num_epochs=50,
     batch_size=2,
     learning_rate=2e-4,
     max_length=512
@@ -182,12 +182,14 @@ if __name__ == "__main__":
         "model_name": "AI4Chem/ChemLLM-7B-Chat",
         "train_data_path": "dataset/train_data.jsonl",
         "output_dir": "./chemllm_lora_output",
-        "num_epochs": 5,
+        "num_epochs": 55,
         "batch_size": 2,
         "learning_rate": 2e-4,
         "max_length": 512
     }
 
     train_model(**config)
+
+
 
 
