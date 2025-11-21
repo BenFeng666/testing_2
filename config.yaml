@@ -2,12 +2,12 @@
 
 # Model paths
 model:
-  base_model_path: "Qwen/Qwen-7B-Chat"
-  lora_path: "./qwen_lora_finetuned"
+  base_model_path: "AI4Chem/ChemLLM-7B-Chat"
+  lora_path: "./chemllm_lora_output"
 
 # Data paths
 data:
-  test_set: "dataset/1600set.xlsx"
+  test_set: "toxic_data/toxicity_test_data.jsonl"
   output_dir: "output"
   target_smiles_file: "output/target_smiles.json"
   unsure_smiles_file: "output/unsure_smiles.json"
