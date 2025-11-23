@@ -493,13 +493,13 @@ def train_multi_task_model(config_path="training_config.yaml"):
         config['model']['base_model_path'],
         trust_remote_code=True,
         device_map="auto",
-        load_in_8bit=config['optimization']['load_in_8bit'],
+        load_in_8bit=config['optimization']['load_in_4bit'],
         torch_dtype=torch.bfloat16 if config['optimization']['bf16'] else torch.float16,
         low_cpu_mem_usage=True,
     )
     
     # Prepare for kbit training
-    if config['optimization']['load_in_8bit']:
+    if config['optimization']['load_in_4bit']:
         model = prepare_model_for_kbit_training(model)
     
     # Apply LoRA
@@ -556,7 +556,7 @@ def train_multi_task_model(config_path="training_config.yaml"):
         warmup_steps=config['training']['warmup_steps'],
         optim=config['optimization']['optim'],
         save_total_limit=config['training'].get('save_total_limit', 2),
-        eval_strategy=config['training'].get('eval_strategy', 'no'),
+        evaluation_strategy=config['training'].get('evaluation_strategy', 'no'),
         eval_steps=config['training'].get('eval_steps', None),
         per_device_eval_batch_size=config['training'].get('per_device_eval_batch_size', 1),
         report_to="none",
