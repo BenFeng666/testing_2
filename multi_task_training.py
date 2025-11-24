@@ -363,7 +363,7 @@ class MultiTaskTrainer(Trainer):
                         reduction="mean",
                     )
 
-        total_loss = lm_loss + loss_tox*100 + self.alpha * loss_eff
+        total_loss = lm_loss + loss_tox + self.alpha * loss_eff
 
         # Logging
         if (
