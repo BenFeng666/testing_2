@@ -13,48 +13,40 @@ class VerifierAgent:
     Verifier Agent that inspects low-confidence predictions and validates
     logical consistency between predicted scores and explanations
     """
-    
+
     def __init__(self, base_model_path, device="auto"):
-        """
-        Initialize Verifier Agent
-        
-        Args:
-            base_model_path: Path to base Qwen 7B model (no finetuning needed)
-            device: Device to run model on
-        """
         self.device = device
-        
+
         print(f"[Verifier Agent] Loading model from {base_model_path}...")
         self.tokenizer = AutoTokenizer.from_pretrained(
             base_model_path,
             trust_remote_code=True,
-            padding_side='right'
+            padding_side="right"
         )
-        
+
         self.model = AutoModelForCausalLM.from_pretrained(
             base_model_path,
             trust_remote_code=True,
             device_map=device,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float16
         )
         self.model.eval()
-    
+
     def verify(self, smiles_structure, predicted_toxicity, predicted_efficiency, reasoning):
         """
-        Verify logical consistency between predicted scores and reasoning
-        
-        Args:
-            smiles_structure: SMILES string
-            predicted_toxicity: Predicted toxicity score
-            predicted_efficiency: Predicted efficiency score
-            reasoning: Reasoning explanation
-            
-        Returns:
-            dict: Verification result with consistency check and alternative scores if needed
+        Verify logical consistency between predicted scores and reasoning.
+        Uses a plain text prompt (no chat template).
         """
-        prompt = f"""You are a verification expert for lipid nanoparticle (LNP) delivery systems.
 
-Given the following prediction for molecule: {smiles_structure}
+        # ------------------------------------------------------------
+        # PLAIN PROMPT MODE (no chat, consistent with PredictorAgent)
+        # ------------------------------------------------------------
+        prompt = f"""
+You are an expert verification analyst for lipid nanoparticle (LNP) delivery systems.
+
+Evaluate the following prediction:
+
+Molecule: {smiles_structure}
 
 Predicted Toxicity: {predicted_toxicity}/10
 Predicted Efficiency: {predicted_efficiency}/10
@@ -65,175 +57,129 @@ Please verify:
 2. Are the scores reasonable given the molecular structure?
 3. If there are inconsistencies, what would be more appropriate scores?
 
-Respond in the following format:
+Respond in the following exact format:
 Consistency: [YES/NO/PARTIAL]
 Verification: [detailed analysis]
 Suggested Toxicity: [score or N/A]
 Suggested Efficiency: [score or N/A]
-Confidence: [HIGH/MEDIUM/LOW]"""
-        
-        messages = [
-            {
-                "role": "system",
-                "content": "You are an expert verifier for drug discovery predictions. You check logical consistency between predicted scores and their explanations, identifying inconsistencies and suggesting corrections when needed."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
-        
-        # Format conversation
-        text = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
-        
+Confidence: [HIGH/MEDIUM/LOW]
+
+Your response:
+"""
+
+        # Create model inputs
+        inputs = self.tokenizer([prompt], return_tensors="pt").to(self.model.device)
+
         # Generate verification
-        model_inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
-        
         with torch.no_grad():
-            generated_ids = self.model.generate(
-                model_inputs.input_ids,
-                max_new_tokens=512,
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=450,
                 do_sample=False,
                 temperature=0.3,
                 top_p=0.9,
+                pad_token_id=self.tokenizer.eos_token_id
             )
-        
-        # Decode
-        generated_ids = [
-            output_ids[len(input_ids):] 
-            for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
-        ]
-        
-        response = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        
-        # Parse verification response
-        verification_result = self._parse_verification(response)
-        
+
+        # Extract only generated text
+        response = self.tokenizer.decode(
+            outputs[0][inputs["input_ids"].shape[1]:],
+            skip_special_tokens=True
+        ).strip()
+
+        # Parse structured verification
+        verification = self._parse_verification(response)
+
         return {
-            'smiles': smiles_structure,
-            'is_consistent': verification_result['is_consistent'],
-            'consistency_level': verification_result['consistency_level'],
-            'verification_text': verification_result['verification_text'],
-            'suggested_toxicity': verification_result['suggested_toxicity'],
-            'suggested_efficiency': verification_result['suggested_efficiency'],
-            'verification_confidence': verification_result['confidence'],
-            'raw_response': response
+            "smiles": smiles_structure,
+            "is_consistent": verification["is_consistent"],
+            "consistency_level": verification["consistency_level"],
+            "verification_text": verification["verification_text"],
+            "suggested_toxicity": verification["suggested_toxicity"],
+            "suggested_efficiency": verification["suggested_efficiency"],
+            "verification_confidence": verification["confidence"],
+            "raw_response": response
         }
-    
+
     def _parse_verification(self, response):
         """
-        Parse verification response
-        
-        Args:
-            response: Model response text
-            
-        Returns:
-            dict: Parsed verification result
+        Parse verification response.
         """
         result = {
-            'is_consistent': False,
-            'consistency_level': 'UNKNOWN',
-            'verification_text': '',
-            'suggested_toxicity': None,
-            'suggested_efficiency': None,
-            'confidence': 'MEDIUM'
+            "is_consistent": False,
+            "consistency_level": "UNKNOWN",
+            "verification_text": "",
+            "suggested_toxicity": None,
+            "suggested_efficiency": None,
+            "confidence": "MEDIUM"
         }
-        
-        # Extract consistency
-        consistency_patterns = [
-            r'[Cc]onsistency[:\s]+(YES|NO|PARTIAL)',
-            r'[Cc]onsistent[:\s]+(YES|NO|PARTIAL)',
+
+        # Consistency
+        patterns = [
+            r"[Cc]onsistency[:\s]+(YES|NO|PARTIAL)"
         ]
-        for pattern in consistency_patterns:
-            match = re.search(pattern, response, re.IGNORECASE)
-            if match:
-                level = match.group(1).upper()
-                result['consistency_level'] = level
-                result['is_consistent'] = (level == 'YES')
+        for p in patterns:
+            m = re.search(p, response)
+            if m:
+                level = m.group(1).upper()
+                result["consistency_level"] = level
+                result["is_consistent"] = (level == "YES")
                 break
-        
-        # Extract verification text
-        verification_patterns = [
-            r'[Vv]erification[:\s]+(.*?)(?:\n\n|Suggested|Confidence|\Z)',
-            r'[Aa]nalysis[:\s]+(.*?)(?:\n\n|Suggested|Confidence|\Z)',
+
+        # Verification text
+        text_patterns = [
+            r"[Vv]erification[:\s]+(.*?)(?:Suggested|Confidence|\Z)",
+            r"[Aa]nalysis[:\s]+(.*?)(?:Suggested|Confidence|\Z)"
         ]
-        for pattern in verification_patterns:
-            match = re.search(pattern, response, re.DOTALL)
-            if match:
-                result['verification_text'] = match.group(1).strip()
+        for p in text_patterns:
+            m = re.search(p, response, re.DOTALL)
+            if m:
+                result["verification_text"] = m.group(1).strip()
                 break
-        
-        # Extract suggested scores
-        suggested_toxicity_patterns = [
-            r'[Ss]uggested\s+[Tt]oxicity[:\s]+(\d+(?:\.\d+)?|N/A)',
-        ]
-        for pattern in suggested_toxicity_patterns:
-            match = re.search(pattern, response, re.IGNORECASE)
-            if match:
-                val = match.group(1)
-                if val.upper() != 'N/A':
-                    try:
-                        result['suggested_toxicity'] = float(val)
-                    except ValueError:
-                        pass
-                break
-        
-        suggested_efficiency_patterns = [
-            r'[Ss]uggested\s+[Ee]fficiency[:\s]+(\d+(?:\.\d+)?|N/A)',
-        ]
-        for pattern in suggested_efficiency_patterns:
-            match = re.search(pattern, response, re.IGNORECASE)
-            if match:
-                val = match.group(1)
-                if val.upper() != 'N/A':
-                    try:
-                        result['suggested_efficiency'] = float(val)
-                    except ValueError:
-                        pass
-                break
-        
-        # Extract confidence
-        confidence_patterns = [
-            r'[Cc]onfidence[:\s]+(HIGH|MEDIUM|LOW)',
-        ]
-        for pattern in confidence_patterns:
-            match = re.search(pattern, response, re.IGNORECASE)
-            if match:
-                result['confidence'] = match.group(1).upper()
-                break
-        
-        # If no verification text found, use the whole response
-        if not result['verification_text']:
-            result['verification_text'] = response.strip()
-        
+
+        # Suggested Toxicity
+        m = re.search(r"[Ss]uggested\s+[Tt]oxicity[:\s]+(\d+(?:\.\d+)?|N/A)", response)
+        if m:
+            val = m.group(1)
+            if val.upper() != "N/A":
+                try:
+                    result["suggested_toxicity"] = float(val)
+                except:
+                    pass
+
+        # Suggested Efficiency
+        m = re.search(r"[Ss]uggested\s+[Ee]fficiency[:\s]+(\d+(?:\.\d+)?|N/A)", response)
+        if m:
+            val = m.group(1)
+            if val.upper() != "N/A":
+                try:
+                    result["suggested_efficiency"] = float(val)
+                except:
+                    pass
+
+        # Confidence
+        m = re.search(r"[Cc]onfidence[:\s]+(HIGH|MEDIUM|LOW)", response)
+        if m:
+            result["confidence"] = m.group(1).upper()
+
+        # fallback if missing
+        if not result["verification_text"]:
+            result["verification_text"] = response.strip()
+
         return result
-    
+
     def agrees_with_prediction(self, verification_result, tolerance=1.0):
         """
-        Check if verifier agrees with the original prediction
-        
-        Args:
-            verification_result: Verification result dictionary
-            tolerance: Tolerance for score differences
-            
-        Returns:
-            bool: True if verifier agrees
+        Determine whether verifier agrees with original scores.
         """
-        if verification_result['is_consistent']:
+        if verification_result["is_consistent"]:
             return True
-        
-        # Check if suggested scores are close to original
-        if verification_result['suggested_toxicity'] is not None:
-            # If suggestions are very different, verifier disagrees
-            return False
-        
-        # If consistency is PARTIAL, it's a partial agreement
-        if verification_result['consistency_level'] == 'PARTIAL':
-            return False
-        
-        return False
 
+        # If suggested new scores exist → disagreement
+        if verification_result["suggested_toxicity"] is not None:
+            return False
+
+        if verification_result["consistency_level"] == "PARTIAL":
+            return False
+
+        return False
