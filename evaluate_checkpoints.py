@@ -77,44 +77,50 @@ def extract_efficiency(response):
 
 
 def predict_toxicity_and_efficiency(model, tokenizer, smiles, max_length=512):
-    """Predict both toxicity and efficiency for a SMILES string"""
-    prompt = f"Analyze this lipid molecule for LNP delivery systems: {smiles}"
+    """Fast prediction: no chat template, short prompt, small generation."""
     
-    messages = [
-        {
-            "role": "system",
-            "content": "You are an expert in lipid nanoparticle (LNP) delivery systems and drug discovery. You analyze lipid molecules for their toxicity and delivery efficiency, providing detailed reasoning based on molecular structure, functional groups, and known properties."
-        },
-        {
-            "role": "user",
-            "content": prompt
-        }
-    ]
-    
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True
+    system_prompt = (
+        "You are an expert in lipid nanoparticle (LNP) design. "
+        "You analyze a molecule and output:\n"
+        "Toxicity: 0 or 1\n"
+        "Efficiency: an integer 1–10\n"
+        "Respond ONLY with numbers."
     )
-    
-    inputs = tokenizer(text, return_tensors="pt", max_length=max_length, truncation=True)
+
+    user_prompt = f"What are the toxicity (0/1) and efficiency (1–10) scores for: {smiles}?"
+
+    prompt = (
+        f"{system_prompt}\n"
+        f"{user_prompt}\n"
+        "Toxicity:"
+    )
+
+    # Tokenize
+    inputs = tokenizer(prompt, return_tensors="pt", max_length=max_length, truncation=True)
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
-    
+
+    # Generate a short answer
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=256,
-            temperature=0.1,
+            max_new_tokens=32,     # MUCH faster than 256
             do_sample=False,
+            temperature=0.1,
             pad_token_id=tokenizer.eos_token_id
         )
-    
-    response = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
-    
+
+    # Decode only the generated part
+    response = tokenizer.decode(
+        outputs[0][inputs["input_ids"].shape[1]:],
+        skip_special_tokens=True
+    )
+
+    # Extract both toxicity + efficiency
     toxicity = extract_toxicity(response)
     efficiency = extract_efficiency(response)
-    
+
     return toxicity, efficiency, response
+
 
 
 def load_test_data(toxic_test_path, efficiency_test_path):
@@ -374,4 +380,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
