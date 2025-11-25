@@ -1,6 +1,7 @@
 """
 Predictor Agent for LipoAgent Multi-Agent Framework
-Simultaneously predicts lipid toxicity and delivery efficiency with reasoning
+Fast simultaneous prediction of lipid toxicity and delivery efficiency
+with uncertainty estimation + detailed reasoning.
 """
 
 import torch
@@ -13,262 +14,270 @@ from confidence_calculator import ConfidenceCalculator
 class PredictorAgent:
     """
     Predictor Agent that simultaneously predicts:
-    - Lipid toxicity (1-10 scale, lower is better)
-    - Delivery efficiency (1-10 scale, higher is better)
-    - Generates textual reasoning
-    - Estimates uncertainty
+    - Lipid toxicity (1-10)
+    - Delivery efficiency (1-10)
+    - Detailed mechanistic reasoning
+    - Confidence / uncertainty estimation
     """
-    
-    def __init__(self, base_model_path, lora_path, score_min=1, score_max=10, device="auto"):
+
+    def __init__(
+        self,
+        base_model_path=None,
+        lora_path=None,
+        base_model_obj=None,
+        tokenizer_obj=None,
+        score_min=1,
+        score_max=10,
+        device="auto"
+    ):
         """
-        Initialize Predictor Agent
-        
-        Args:
-            base_model_path: Path to base Qwen 7B model
-            lora_path: Path to finetuned LoRA weights
-            score_min: Minimum score value
-            score_max: Maximum score value
-            device: Device to run model on
+        Initialize Predictor Agent.
+        This version is compatible with the pipeline:
+        - Accepts base_model_obj + tokenizer_obj (preloaded)
+        - Or loads its own from paths.
         """
+
         self.score_min = score_min
         self.score_max = score_max
         self.device = device
-        
-        print(f"[Predictor Agent] Loading model from {base_model_path}...")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            base_model_path,
-            trust_remote_code=True,
-            padding_side='right'
-        )
-        
-        self.base_model = AutoModelForCausalLM.from_pretrained(
-            base_model_path,
-            trust_remote_code=True,
-            device_map=device,
-            torch_dtype=torch.float16,
-        )
-        
+
+        # 1. Use shared pre-loaded model if provided
+        if base_model_obj is not None and tokenizer_obj is not None:
+            print("[Predictor Agent] Using shared model from pipeline.")
+            self.base_model = base_model_obj
+            self.tokenizer = tokenizer_obj
+        else:
+            # 2. Otherwise load from disk
+            print(f"[Predictor Agent] Loading model from {base_model_path}...")
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                base_model_path,
+                trust_remote_code=True,
+                padding_side='right'
+            )
+
+            self.base_model = AutoModelForCausalLM.from_pretrained(
+                base_model_path,
+                trust_remote_code=True,
+                device_map=device,
+                torch_dtype=torch.float16
+            )
+
+        # 3. Load LoRA adapter
         print(f"[Predictor Agent] Loading LoRA weights from {lora_path}...")
         self.model = PeftModel.from_pretrained(self.base_model, lora_path)
         self.model.eval()
-        
+
         self.confidence_calculator = ConfidenceCalculator(score_min, score_max)
-    
-    def predict(self, smiles_structure, num_samples=5, temperature=0.7, top_p=0.8, max_length=512):
+
+    # =====================================================================
+    # FAST PREDICT FUNCTION
+    # =====================================================================
+    def predict(self, smiles_structure, num_samples=5, temperature=0.6, top_p=0.8, max_length=128):
         """
-        Predict toxicity, efficiency, reasoning, and uncertainty for a molecule
-        
-        Args:
-            smiles_structure: SMILES string
-            num_samples: Number of samples for uncertainty estimation
-            temperature: Sampling temperature
-            top_p: Top-p sampling parameter
-            max_length: Maximum generation length
-            
-        Returns:
-            dict: Prediction results with toxicity, efficiency, reasoning, and confidence
+        Fast prediction method:
+        - Generates full reasoning ONCE
+        - Score samples use short "score-only" generation
+
+        Toxicity is binary:
+        - 0 = not toxic
+        - 1 = toxic
         """
-        # Create comprehensive prompt for simultaneous prediction
-        prompt = f"""Analyze this lipid molecule for LNP delivery systems: {smiles_structure}
+
+        # ===== 1. Build prompts =====
+        full_prompt = f"""Analyze this lipid molecule for LNP delivery systems: {smiles_structure}
 
 Please provide:
-1. Toxicity score (1-10, where 1 is least toxic and 10 is most toxic)
-2. Delivery efficiency score (1-10, where 1 is least efficient and 10 is most efficient)
-3. Detailed reasoning explaining both scores based on molecular structure, functional groups, and known properties.
+1. Toxicity score (0 for not toxic and 1 for toxic)
+2. Delivery efficiency score (1-10)
+3. Detailed reasoning.
 
-Format your response as:
-Toxicity: [score]
-Efficiency: [score]
-Reasoning: [detailed explanation]"""
-        
-        messages = [
+Format:
+Toxicity: X
+Efficiency: Y
+Reasoning: ..."""
+
+        score_only_prompt = f"""Analyze this lipid: {smiles_structure}
+Return only the numerical toxicity and efficiency scores.
+
+Toxicity must be 0 (not toxic) or 1 (toxic).
+Efficiency must be from 1 to 10.
+
+Format:
+Toxicity: X
+Efficiency: Y
+"""
+
+        # ===== 2. Build messages =====
+        full_msg = [
             {
                 "role": "system",
-                "content": "You are an expert in lipid nanoparticle (LNP) delivery systems and drug discovery. You analyze lipid molecules for their toxicity and delivery efficiency, providing detailed reasoning based on molecular structure, functional groups, and known properties."
+                "content": "You are an expert in lipid nanoparticles. Provide binary toxicity (0 or 1), efficiency (1–10), and reasoning."
             },
-            {
-                "role": "user",
-                "content": prompt
-            }
+            {"role": "user", "content": full_prompt}
         ]
-        
-        # Format conversation
-        text = self.tokenizer.apply_chat_template(
-            messages,
+
+        score_only_msg = [
+            {
+                "role": "system",
+                "content": "Return ONLY toxicity (0 or 1) and efficiency (1–10) numbers, no explanation."
+            },
+            {"role": "user", "content": score_only_prompt}
+        ]
+
+        # ===== Apply chat template once =====
+        full_text = self.tokenizer.apply_chat_template(
+            full_msg,
             tokenize=False,
             add_generation_prompt=True
         )
-        
-        # Generate multiple samples for uncertainty estimation
+        score_text = self.tokenizer.apply_chat_template(
+            score_only_msg,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+
+        full_inputs = self.tokenizer([full_text], return_tensors="pt").to(self.model.device)
+        score_inputs = self.tokenizer([score_text], return_tensors="pt").to(self.model.device)
+
+        # ==================================================================
+        # STEP 3: Generate full reasoning (ONCE)
+        # ==================================================================
+        with torch.no_grad():
+            full_out = self.model.generate(
+                full_inputs.input_ids,
+                max_new_tokens=256,
+                do_sample=True,
+                temperature=temperature,
+                top_p=top_p
+            )
+
+        trim = full_out[0][len(full_inputs.input_ids[0]):]
+        full_response = self.tokenizer.decode(trim, skip_special_tokens=True)
+        parsed_full = self._parse_response(full_response)
+
+        # ==================================================================
+        # STEP 4: Fast score-only sampling (seeded with full pass)
+        # ==================================================================
         toxicity_samples = []
         efficiency_samples = []
-        reasoning_samples = []
-        
+
+        full_tox = parsed_full.get("toxicity")
+        full_eff = parsed_full.get("efficiency")
+        if full_tox is not None:
+            toxicity_samples.append(full_tox)
+        if full_eff is not None:
+            efficiency_samples.append(full_eff)
+
         for _ in range(num_samples):
-            model_inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
-            
             with torch.no_grad():
-                generated_ids = self.model.generate(
-                    model_inputs.input_ids,
-                    max_new_tokens=max_length,
+                out = self.model.generate(
+                    score_inputs.input_ids,
+                    max_new_tokens=16,
                     do_sample=True,
-                    temperature=temperature,
-                    top_p=top_p,
+                    temperature=0.3,
+                    top_p=0.9
                 )
-            
-            # Decode
-            generated_ids = [
-                output_ids[len(input_ids):] 
-                for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
-            ]
-            
-            response = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            
-            # Parse response
-            parsed = self._parse_response(response)
-            if parsed['toxicity'] is not None:
-                toxicity_samples.append(parsed['toxicity'])
-            if parsed['efficiency'] is not None:
-                efficiency_samples.append(parsed['efficiency'])
-            if parsed['reasoning']:
-                reasoning_samples.append(parsed['reasoning'])
-        
-        # Calculate confidence and statistics
-        toxicity_result = None
-        efficiency_result = None
-        
-        if len(toxicity_samples) >= num_samples // 2:
-            toxicity_result = self.confidence_calculator.calculate_confidence_from_samples(toxicity_samples)
-        
-        if len(efficiency_samples) >= num_samples // 2:
-            efficiency_result = self.confidence_calculator.calculate_confidence_from_samples(efficiency_samples)
-        
-        # Use most common reasoning or combine them
-        final_reasoning = self._combine_reasoning(reasoning_samples) if reasoning_samples else "No reasoning generated."
-        
+
+            trim2 = out[0][len(score_inputs.input_ids[0]):]
+            resp = self.tokenizer.decode(trim2, skip_special_tokens=True)
+            parsed = self._parse_response(resp)
+
+            if parsed["toxicity"] is not None:
+                toxicity_samples.append(parsed["toxicity"])
+
+            if parsed["efficiency"] is not None:
+                efficiency_samples.append(parsed["efficiency"])
+
+        # ==================================================================
+        # STEP 5: Confidence estimation
+        # ==================================================================
+        tox_result = (
+            self.confidence_calculator.calculate_confidence_from_samples(toxicity_samples)
+            if len(toxicity_samples) > 0 else None
+        )
+
+        eff_result = (
+            self.confidence_calculator.calculate_confidence_from_samples(efficiency_samples)
+            if len(efficiency_samples) > 0 else None
+        )
+
         return {
-            'smiles': smiles_structure,
-            'toxicity': {
-                'score': toxicity_result['mean_score'] if toxicity_result else None,
-                'confidence': toxicity_result['confidence'] if toxicity_result else 0.0,
-                'std': toxicity_result['std_score'] if toxicity_result else None,
-                'samples': toxicity_samples
+            "smiles": smiles_structure,
+            "toxicity": {
+                "score": tox_result["mean_score"] if tox_result else None,
+                "confidence": tox_result["confidence"] if tox_result else 0.0,
+                "std": tox_result["std_score"] if tox_result else None,
+                "samples": toxicity_samples,
             },
-            'efficiency': {
-                'score': efficiency_result['mean_score'] if efficiency_result else None,
-                'confidence': efficiency_result['confidence'] if efficiency_result else 0.0,
-                'std': efficiency_result['std_score'] if efficiency_result else None,
-                'samples': efficiency_samples
+            "efficiency": {
+                "score": eff_result["mean_score"] if eff_result else None,
+                "confidence": eff_result["confidence"] if eff_result else 0.0,
+                "std": eff_result["std_score"] if eff_result else None,
+                "samples": efficiency_samples,
             },
-            'reasoning': final_reasoning,
-            'overall_confidence': min(
-                toxicity_result['confidence'] if toxicity_result else 0.0,
-                efficiency_result['confidence'] if efficiency_result else 0.0
-            ),
-            'num_samples': len(toxicity_samples)
+            "reasoning": parsed_full.get("reasoning", "No reasoning found."),
+            "overall_confidence": min(
+                tox_result["confidence"] if tox_result else 0.0,
+                eff_result["confidence"] if eff_result else 0.0
+            )
         }
-    
+
+
+    # =====================================================================
+    # RESPONSE PARSER
+    # =====================================================================
     def _parse_response(self, response):
         """
-        Parse model response to extract toxicity, efficiency, and reasoning
-        
-        Args:
-            response: Model response text
-            
-        Returns:
-            dict: Parsed values
+        Extract toxicity, efficiency, reasoning from generated text
         """
-        result = {
-            'toxicity': None,
-            'efficiency': None,
-            'reasoning': ''
-        }
-        
-        # Extract toxicity score
-        toxicity_patterns = [
-            r'[Tt]oxicity[:\s]+(\d+(?:\.\d+)?)',
-            r'[Tt]oxic[:\s]+(\d+(?:\.\d+)?)',
-        ]
-        for pattern in toxicity_patterns:
-            match = re.search(pattern, response)
-            if match:
-                try:
-                    score = float(match.group(1))
-                    if self.score_min <= score <= self.score_max:
-                        result['toxicity'] = score
-                        break
-                except (ValueError, IndexError):
-                    continue
-        
-        # Extract efficiency score
-        efficiency_patterns = [
-            r'[Ee]fficiency[:\s]+(\d+(?:\.\d+)?)',
-            r'[Ee]fficient[:\s]+(\d+(?:\.\d+)?)',
-            r'[Dd]elivery[:\s]+(\d+(?:\.\d+)?)',
-        ]
-        for pattern in efficiency_patterns:
-            match = re.search(pattern, response)
-            if match:
-                try:
-                    score = float(match.group(1))
-                    if self.score_min <= score <= self.score_max:
-                        result['efficiency'] = score
-                        break
-                except (ValueError, IndexError):
-                    continue
-        
-        # Extract reasoning
-        reasoning_patterns = [
-            r'[Rr]easoning[:\s]+(.*?)(?:\n\n|\Z)',
-            r'[Ee]xplanation[:\s]+(.*?)(?:\n\n|\Z)',
-        ]
-        for pattern in reasoning_patterns:
-            match = re.search(pattern, response, re.DOTALL)
-            if match:
-                result['reasoning'] = match.group(1).strip()
-                break
-        
-        # If no reasoning found, use the whole response after scores
-        if not result['reasoning']:
-            # Try to extract text after the scores
-            lines = response.split('\n')
-            reasoning_lines = []
-            found_scores = False
-            for line in lines:
-                if any(keyword in line.lower() for keyword in ['reasoning', 'explanation', 'because', 'due to']):
-                    found_scores = True
-                if found_scores or (result['toxicity'] is None and result['efficiency'] is None):
-                    reasoning_lines.append(line)
-            result['reasoning'] = '\n'.join(reasoning_lines).strip()
-        
-        return result
-    
-    def _combine_reasoning(self, reasoning_samples):
-        """
-        Combine multiple reasoning samples into a final reasoning
-        
-        Args:
-            reasoning_samples: List of reasoning strings
-            
-        Returns:
-            str: Combined reasoning
-        """
-        if not reasoning_samples:
-            return "No reasoning available."
-        
-        # Use the longest/most detailed reasoning
-        return max(reasoning_samples, key=len)
-    
-    def is_low_confidence(self, prediction, confidence_threshold=6.0):
-        """
-        Check if prediction has low confidence
-        
-        Args:
-            prediction: Prediction result dictionary
-            confidence_threshold: Confidence threshold
-            
-        Returns:
-            bool: True if low confidence
-        """
-        return prediction['overall_confidence'] < confidence_threshold
+        result = {"toxicity": None, "efficiency": None, "reasoning": ""}
 
+        # Toxicity
+        tox_patterns = [
+            r"[Tt]oxicity[:\s]+(\d+(?:\.\d+)?)",
+            r"[Tt]oxic[:\s]+(\d+(?:\.\d+)?)"
+        ]
+        for p in tox_patterns:
+            m = re.search(p, response)
+            if m:
+                try:
+                    val = float(m.group(1))
+                    if self.score_min <= val <= self.score_max:
+                        result["toxicity"] = val
+                        break
+                except Exception:
+                    pass
+
+        # Efficiency
+        eff_patterns = [
+            r"[Ee]fficiency[:\s]+(\d+(?:\.\d+)?)",
+            r"[Ee]fficient[:\s]+(\d+(?:\.\d+)?)",
+            r"[Dd]elivery[:\s]+(\d+(?:\.\d+)?)"
+        ]
+        for p in eff_patterns:
+            m = re.search(p, response)
+            if m:
+                try:
+                    val = float(m.group(1))
+                    if self.score_min <= val <= self.score_max:
+                        result["efficiency"] = val
+                        break
+                except Exception:
+                    pass
+
+        # Reasoning
+        reason_patterns = [
+            r"[Rr]easoning[:\s]+(.*)",
+            r"[Ee]xplanation[:\s]+(.*)"
+        ]
+        for p in reason_patterns:
+            m = re.search(p, response, re.DOTALL)
+            if m:
+                result["reasoning"] = m.group(1).strip()
+                break
+
+        return result
+
+    def is_low_confidence(self, prediction, confidence_threshold=6.0):
+        """Check if prediction confidence is low."""
+        return prediction["overall_confidence"] < confidence_threshold
