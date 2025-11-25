@@ -7,20 +7,21 @@ model:
 
 # Data paths
 data:
-  test_set: "toxic_data/toxicity_test_data.jsonl"
+  test_set: "/content/testing_2/data/efficiency_test_data.jsonl"
   output_dir: "output"
   target_smiles_file: "output/target_smiles.json"
   unsure_smiles_file: "output/unsure_smiles.json"
   feedback_history_file: "output/feedback_history.json"
   predictions_file: "output/predictions.json"
+  max_test_samples: 10
 
 # Score prediction settings
 prediction:
   score_min: 1
   score_max: 10
-  max_length: 512
+  max_length: 258
   temperature: 0.7
-  top_p: 0.8
+  top_p: 0.9
   num_samples: 10  # Number of samples for uncertainty estimation
 
 # Confidence and score thresholds
@@ -40,3 +41,8 @@ active_learning:
   update_after_feedback: true  # Update predictions after each feedback round
   use_feedback_for_training: false  # Whether to retrain model with feedback (future feature)
 
+# Multi-agent settings (LipoAgent framework)
+multi_agent:
+  max_negotiation_loops: 1  # Maximum number of negotiation loops between agents
+  consensus_threshold: 0.8  # Threshold for consensus (0-1)
+  low_confidence_threshold: 6.0  # Confidence threshold below which verification is needed (0-10 scale)
