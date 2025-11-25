@@ -4,7 +4,7 @@
 model:
   base_model_path: "AI4Chem/ChemLLM-7B-Chat"
   lora_path: null  # Will be created during training
-  output_dir: "./chemllm_lora_output"
+  output_dir: "/content/testing_2/chemllm_lora_output/checkpoint-1200"
 
 # Data settings
 data:
@@ -18,14 +18,14 @@ data:
 
 # Training hyperparameters
 training:
-  num_epochs: 35
+  num_epochs: 25
   batch_size: 4
   per_device_train_batch_size: 1
   gradient_accumulation_steps: 16
   learning_rate: 2e-4
   warmup_steps: 20
   save_strategy: "steps"  # Save every N steps
-  save_steps: 200  # Save checkpoint every 20 steps
+  save_steps: 150  # Save checkpoint every 20 steps
   logging_steps: 15
   save_total_limit: 100  # Keep more checkpoints for evaluation
   evaluation_strategy: "steps"  # Evaluate every N steps
