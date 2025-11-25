@@ -55,6 +55,11 @@ class MultiAgentPipeline:
         self.max_negotiation_loops = self.config.get('multi_agent', {}).get('max_negotiation_loops', 2)
         self.consensus_threshold = self.config.get('multi_agent', {}).get('consensus_threshold', 0.8)
         self.low_confidence_threshold = self.config.get('multi_agent', {}).get('low_confidence_threshold', 6.0)
+
+        # Optional: limit how many test samples to load from data file
+        self.max_test_samples = self.config.get('data', {}).get('max_test_samples', None)
+        if self.max_test_samples is not None:
+            self.max_test_samples = int(self.max_test_samples)
     
     def load_agents(self):
         """Load Predictor and Verifier agents"""
@@ -76,54 +81,66 @@ class MultiAgentPipeline:
         print("[Verifier Agent] Loaded successfully!")
     
     def load_test_set(self):
-        """Load test set from Excel file"""
-        print(f"\nLoading test set from: {self.config['data']['test_set']}")
-        
-        # Read the Excel file
-        df = pd.read_excel(self.config['data']['test_set'])
-        
-        print(f"Dataset shape: {df.shape}")
-        print(f"Available columns: {df.columns.tolist()}")
-        
-        # Find the Structure/SMILES column
+        """Load test set from JSONL or Excel (auto-detect)."""
+
+        test_path = self.config['data']['test_set']
+        print(f"\nLoading test set from: {test_path}")
+
+        if test_path.endswith(".jsonl"):
+            print("Detected JSONL efficiency dataset — loading...")
+            molecules = []
+            import json, re
+            with open(test_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    item = json.loads(line)
+                    messages = item.get("messages", [])
+                    if len(messages) < 2:
+                        continue
+                    user_msg = messages[1]["content"]
+                    m = re.search(r"molecular structure:\s*(.+?)\??$", user_msg)
+                    if not m:
+                        continue
+                    smiles = m.group(1).strip()
+                    molecules.append({
+                        "smiles": smiles,
+                        "status": "pending",
+                        "negotiation_history": []
+                    })
+            self.all_molecules = molecules
+            print(f"Loaded {len(self.all_molecules)} molecules from JSONL test set")
+
+            # Optional: limit number of samples
+            if self.max_test_samples is not None:
+                self.all_molecules = self.all_molecules[:self.max_test_samples]
+                print(f"Using first {len(self.all_molecules)} molecules (max_test_samples={self.max_test_samples})")
+
+            return self.all_molecules
+
+        print("Detected Excel dataset — loading with pandas")
+        df = pd.read_excel(test_path)
         structure_col = None
         for col in df.columns:
-            col_lower = str(col).lower()
-            if 'structure' in col_lower or 'smiles' in col_lower or 'smile' in col_lower:
+            if 'structure' in str(col).lower() or 'smiles' in str(col).lower():
                 structure_col = col
                 break
-        
         if structure_col is None:
-            if len(df.columns) == 1:
-                structure_col = df.columns[0]
-            else:
-                for col in df.columns:
-                    if df[col].dtype == 'object':
-                        avg_len = df[col].astype(str).str.len().mean()
-                        if avg_len > 20:
-                            structure_col = col
-                            break
-                
-                if structure_col is None:
-                    structure_col = df.columns[0]
+            structure_col = df.columns[0]
         
-        print(f"Using column '{structure_col}' as SMILES structure")
-        
-        # Extract SMILES
-        smiles_list = df[structure_col].dropna().tolist()
-        
-        # Convert to string and filter valid SMILES
         self.all_molecules = []
-        for smiles in smiles_list:
-            smiles_str = str(smiles).strip()
-            if smiles_str and smiles_str != 'nan' and len(smiles_str) > 5:
+        for smiles in df[structure_col].dropna().astype(str):
+            if len(smiles.strip()) > 5:
                 self.all_molecules.append({
-                    'smiles': smiles_str,
-                    'status': 'pending',
-                    'negotiation_history': []
+                    "smiles": smiles.strip(),
+                    "status": "pending",
+                    "negotiation_history": []
                 })
-        
-        print(f"Loaded {len(self.all_molecules)} molecules from test set")
+        print(f"Loaded {len(self.all_molecules)} molecules from Excel test set")
+
+        # Optional: limit number of samples for Excel too
+        if self.max_test_samples is not None:
+            self.all_molecules = self.all_molecules[:self.max_test_samples]
+            print(f"Using first {len(self.all_molecules)} molecules (max_test_samples={self.max_test_samples})")
+
         return self.all_molecules
     
     def negotiate_prediction(self, molecule):
@@ -157,10 +174,22 @@ class MultiAgentPipeline:
                 max_length=self.config['prediction']['max_length']
             )
             
-            print(f"  Toxicity: {prediction['toxicity']['score']:.2f} (confidence: {prediction['toxicity']['confidence']:.2f})")
-            print(f"  Efficiency: {prediction['efficiency']['score']:.2f} (confidence: {prediction['efficiency']['confidence']:.2f})")
-            print(f"  Overall Confidence: {prediction['overall_confidence']:.2f}")
-            
+            tox_score = prediction['toxicity']['score']
+            tox_conf = prediction['toxicity']['confidence']
+            eff_score = prediction['efficiency']['score']
+            eff_conf = prediction['efficiency']['confidence']
+            overall_conf = prediction['overall_confidence']
+
+            tox_score_str = f"{tox_score:.2f}" if tox_score is not None else "N/A"
+            tox_conf_str = f"{tox_conf:.2f}" if tox_conf is not None else "N/A"
+            eff_score_str = f"{eff_score:.2f}" if eff_score is not None else "N/A"
+            eff_conf_str = f"{eff_conf:.2f}" if eff_conf is not None else "N/A"
+            overall_conf_str = f"{overall_conf:.2f}" if overall_conf is not None else "N/A"
+
+            print(f"  Toxicity: {tox_score_str} (confidence: {tox_conf_str})")
+            print(f"  Efficiency: {eff_score_str} (confidence: {eff_conf_str})")
+            print(f"  Overall Confidence: {overall_conf_str}")
+
             # Step 2: Check if low confidence - if so, verify
             if self.predictor_agent.is_low_confidence(prediction, self.low_confidence_threshold):
                 print(f"[Loop {loop_num}] Low confidence detected. Verifier Agent checking...")
