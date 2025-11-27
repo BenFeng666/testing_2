@@ -38,10 +38,10 @@ def load_model(base_model_path, lora_path):
 
 
 # ============================================================
-# Extraction utils
+# Extraction utils (PRED extraction UNCHANGED)
 # ============================================================
 def extract_toxicity(response):
-    """Extract toxicity from model output."""
+    """Extract toxicity from model output (prediction)."""
     nums = re.findall(r"\d+", response)
     if not nums:
         return 0
@@ -49,46 +49,62 @@ def extract_toxicity(response):
     return 1 if val >= 1 else 0
 
 
+# ============================================================
+# ONLY NEW FUNCTION → correct GT extraction
+# ============================================================
+def extract_toxicity_gt(text):
+    """
+    Extract toxicity ground truth from dataset,
+    without getting digits from SMILES.
+    """
+    # Prefer explicit Toxicity value: X
+    m = re.search(r"Toxicity value:\s*(\d+)", text)
+    if m:
+        val = int(m.group(1))
+        return 1 if val >= 1 else 0
+
+    lower = text.lower()
+    if "non-toxic" in lower:
+        return 0
+    if "toxic" in lower:
+        return 1
+
+    # fallback: last number in the answer
+    nums = re.findall(r"\d+", text)
+    if not nums:
+        return 0
+    return 1 if int(nums[-1]) >= 1 else 0
+
+
 def extract_efficiency(text):
-    """
-    Extract efficiency score (1–10) using the SAME logic as your working script.
-    - Find ALL integers in the text.
-    - Use the LAST one.
-    - Clamp to [1, 10].
-    """
+    """(UNCHANGED)"""
     nums = re.findall(r'\b\d+\b', text)
     if not nums:
         return None
-
-    score = int(nums[-1])  # LAST number = always correct ground truth
-    score = max(1, min(10, score))
-    return score
-
+    score = int(nums[-1])
+    return max(1, min(10, score))
 
 
 # ============================================================
-# FAST generation (no chat template)
+# FAST generation (UNCHANGED)
 # ============================================================
 def fast_generate(model, tokenizer, prompt, max_new=10):
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     with torch.no_grad():
         output = model.generate(
             **inputs,
-              max_new_tokens=16,
-              do_sample=False,
-              temperature=0.1,
-              top_p=0.9,
-              pad_token_id=tokenizer.eos_token_id
+            max_new_tokens=16,
+            do_sample=False,
+            temperature=0.1,
+            top_p=0.9,
+            pad_token_id=tokenizer.eos_token_id
         )
     text = tokenizer.decode(output[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
     return text.strip()
 
 
 # ============================================================
-# Toxicity prediction (fast)
-# ============================================================
-# ============================================================
-# Toxicity prediction (fast, but uses ORIGINAL PROMPT)
+# Toxicity prediction (UNCHANGED)
 # ============================================================
 def predict_toxicity(model, tokenizer, smiles, max_length=512):
 
@@ -100,7 +116,6 @@ def predict_toxicity(model, tokenizer, smiles, max_length=512):
 
     user_prompt = f"Is this molecular structure toxic? {smiles}"
 
-    # Combine manually — NO chat template
     prompt = (
         f"{system_prompt}\n"
         f"{user_prompt}\n"
@@ -113,7 +128,7 @@ def predict_toxicity(model, tokenizer, smiles, max_length=512):
 
 
 # ============================================================
-# Efficiency prediction (fast, but uses ORIGINAL PROMPT)
+# Efficiency prediction (UNCHANGED)
 # ============================================================
 def predict_efficiency(model, tokenizer, smiles, max_length=512):
 
@@ -135,8 +150,9 @@ def predict_efficiency(model, tokenizer, smiles, max_length=512):
     response = fast_generate(model, tokenizer, prompt)
     return extract_efficiency(response), response
 
+
 # ============================================================
-# Toxicity evaluation
+# Toxicity evaluation  (ONLY GT line changed)
 # ============================================================
 def evaluate_toxicity(model, tokenizer, path):
     print("\n" + "="*80)
@@ -153,7 +169,9 @@ def evaluate_toxicity(model, tokenizer, path):
 
     for item in data:
         smiles = item["messages"][1]["content"].split(":")[-1].strip()
-        gt = extract_toxicity(item["messages"][-1]["content"])
+
+        # ✔ ONLY FIXED LINE HERE
+        gt = extract_toxicity_gt(item["messages"][-1]["content"])
 
         pred, raw = predict_toxicity(model, tokenizer, smiles)
 
@@ -176,7 +194,7 @@ def evaluate_toxicity(model, tokenizer, path):
 
 
 # ============================================================
-# Efficiency evaluation
+# Efficiency evaluation (UNCHANGED)
 # ============================================================
 def evaluate_efficiency(model, tokenizer, path):
     print("\n" + "="*80)
@@ -229,7 +247,7 @@ def evaluate_efficiency(model, tokenizer, path):
 
 
 # ============================================================
-# Main
+# Main (UNCHANGED)
 # ============================================================
 def main():
     config = yaml.safe_load(open("training_config.yaml"))
