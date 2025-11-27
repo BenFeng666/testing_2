@@ -1,7 +1,4 @@
-"""
-Evaluate all checkpoints and compute accuracy metrics
-This script evaluates each checkpoint saved during training and saves accuracy results
-"""
+
 
 import os
 import json
@@ -11,19 +8,19 @@ import re
 from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
-from tqdm import tqdm
 import numpy as np
-from sklearn.metrics import accuracy_score, mean_absolute_error, mean_squared_error
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 
+# ============================================================
+# Model Loader
+# ============================================================
 def load_checkpoint_model(base_model_path, checkpoint_path):
-    """Load model from checkpoint"""
     tokenizer = AutoTokenizer.from_pretrained(
         base_model_path,
         trust_remote_code=True,
         padding_side='right'
     )
-    
     model = AutoModelForCausalLM.from_pretrained(
         base_model_path,
         trust_remote_code=True,
@@ -31,351 +28,314 @@ def load_checkpoint_model(base_model_path, checkpoint_path):
         torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
     )
-    
-    # Load LoRA weights from checkpoint
     model = PeftModel.from_pretrained(model, checkpoint_path)
     model.eval()
-    
     return model, tokenizer
 
 
-def extract_toxicity(response):
-    """Extract toxicity label (0 or 1) from response"""
-    toxicity = 0
-    
-    tox_match = re.search(r'Toxicity value:\s*(\d+)', response)
-    if tox_match:
-        toxicity = int(tox_match.group(1))
-        toxicity = 1 if toxicity >= 1 else 0
-    
-    if 'non-toxic' in response.lower():
-        toxicity = 0
-    elif 'toxic' in response.lower() and 'non-toxic' not in response.lower():
-        toxicity = 1
-    
-    return 1 if toxicity >= 1 else 0
+# ============================================================
+# Extraction Helpers (GT + Prediction)
+# ============================================================
+def extract_toxicity(text):
+    m = re.search(r'Toxicity value:\s*(\d+)', text)
+    if m:
+        v = int(m.group(1))
+        return 1 if v >= 1 else 0
+    low = text.lower()
+    if "non-toxic" in low:
+        return 0
+    if "toxic" in low:
+        return 1
+    nums = re.findall(r'\d+', text)
+    if not nums:
+        return 0
+    return 1 if int(nums[-1]) >= 1 else 0
 
 
-def extract_efficiency(response):
-    """Extract efficiency score (1-10) from response"""
-    eff_patterns = [
+def extract_efficiency(text):
+    patterns = [
         r'[Ee]fficiency [Ss]core[:\s]+(\d+)',
         r'[Ee]fficiency[:\s]+(\d+)',
         r'[Ss]core[:\s]+(\d+)',
-        r'predicted score[:\s]+(\d+)',
+        r'[Pp]redicted score[:\s]+(\d+)',
         r'is (\d+)',
     ]
-    
-    for pattern in eff_patterns:
-        match = re.search(pattern, response)
-        if match:
-            score = int(match.group(1))
-            score = max(1, min(10, score))
-            return score
-    
+    for p in patterns:
+        m = re.search(p, text)
+        if m:
+            val = int(m.group(1))
+            return max(1, min(10, val))
     return None
 
 
-def predict_toxicity_and_efficiency(model, tokenizer, smiles, max_length=512):
-    """Fast prediction: no chat template, short prompt, small generation."""
-    
-    system_prompt = (
-        "You are an expert in lipid nanoparticle (LNP) design. "
-        "You analyze a molecule and output:\n"
-        "Toxicity: 0 or 1\n"
-        "Efficiency: an integer 1–10\n"
-        "Respond ONLY with numbers."
+# ============================================================
+# Prediction Function
+# ============================================================
+def predict_tox_eff(model, tokenizer, smiles):
+
+    prompt = f"""Analyze this lipid molecule: {smiles}
+
+Provide:
+1. Predicted molecular score (integer 1 to 10) 
+2. Toxicity (0 or 1, 0 means not toxic and 1 means toxic)
+
+Format EXACTLY as:
+Predicted score: Y
+Toxicity: X
+"""
+
+    messages = [
+        {"role": "system",
+         "content": "You are a helpful assistant specialized in drug discovery and molecular analysis. You can predict molecular scores based on their SMILES structures. Focus on Predicting molecular score"},
+        {"role": "user", "content": prompt}
+    ]
+
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
     )
 
-    user_prompt = f"What are the toxicity (0/1) and efficiency (1–10) scores for: {smiles}?"
+    inputs = tokenizer([text], return_tensors="pt").to(model.device)
 
-    prompt = (
-        f"{system_prompt}\n"
-        f"{user_prompt}\n"
-        "Toxicity:"
-    )
-
-    # Tokenize
-    inputs = tokenizer(prompt, return_tensors="pt", max_length=max_length, truncation=True)
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
-
-    # Generate a short answer
     with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=32,     # MUCH faster than 256
+        output = model.generate(
+            inputs.input_ids,
+            max_new_tokens=40,
             do_sample=False,
-            temperature=0.1,
+            temperature=0.3,
+            top_p=0.9,
             pad_token_id=tokenizer.eos_token_id
         )
 
-    # Decode only the generated part
-    response = tokenizer.decode(
-        outputs[0][inputs["input_ids"].shape[1]:],
-        skip_special_tokens=True
-    )
+    gen = output[0][inputs.input_ids.shape[1]:]
+    response = tokenizer.decode(gen, skip_special_tokens=True)
 
-    # Extract both toxicity + efficiency
-    toxicity = extract_toxicity(response)
-    efficiency = extract_efficiency(response)
+    # Parse model output
+    tox_match = re.search(r"Toxicity:\s*(\d+)", response)
+    eff_match = re.search(r"score:\s*(\d+)", response)
 
-    return toxicity, efficiency, response
+    tox = int(tox_match.group(1)) if tox_match else None
+    eff = int(eff_match.group(1)) if eff_match else None
 
-
-
-def load_test_data(toxic_test_path, efficiency_test_path):
-    """Load test data from JSONL files"""
-    test_data = []
-    
-    # Load toxic test data
-    if os.path.exists(toxic_test_path):
-        with open(toxic_test_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                data = json.loads(line)
-                messages = data.get('messages', [])
-                if len(messages) >= 3:
-                    user_msg = messages[1].get('content', '')
-                    assistant_msg = messages[2].get('content', '')
-                    
-                    # Extract SMILES
-                    smiles_match = re.search(r':\s*([A-Za-z0-9@\[\]()=#\\\/\-\+\.,;:]+)', user_msg)
-                    if smiles_match:
-                        smiles = smiles_match.group(1).strip()
-                        
-                        # Extract true labels
-                        tox_match = re.search(r'Toxicity value:\s*(\d+)', assistant_msg)
-                        true_toxicity = int(tox_match.group(1)) if tox_match else 0
-                        true_toxicity = 1 if true_toxicity >= 1 else 0
-                        
-                        test_data.append({
-                            'smiles': smiles,
-                            'true_toxicity': true_toxicity,
-                            'true_efficiency': None,  # Toxic data doesn't have efficiency
-                            'type': 'toxic'
-                        })
-    
-    # Load efficiency test data
-    if os.path.exists(efficiency_test_path):
-        with open(efficiency_test_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                data = json.loads(line)
-                messages = data.get('messages', [])
-                if len(messages) >= 3:
-                    user_msg = messages[1].get('content', '')
-                    assistant_msg = messages[2].get('content', '')
-                    
-                    # Extract SMILES
-                    smiles_match = re.search(r':\s*([A-Za-z0-9@\[\]()=#\\\/\-\+\.,;:]+)', user_msg)
-                    if smiles_match:
-                        smiles = smiles_match.group(1).strip()
-                        
-                        # Extract true labels
-                        tox_match = re.search(r'Toxicity value:\s*(\d+)', assistant_msg)
-                        eff_match = re.search(r'[Ee]fficiency [Ss]core[:\s]+(\d+)|[Ee]fficiency[:\s]+(\d+)|[Ss]core[:\s]+(\d+)', assistant_msg)
-                        
-                        true_toxicity = int(tox_match.group(1)) if tox_match else 0
-                        true_toxicity = 1 if true_toxicity >= 1 else 0
-                        
-                        if eff_match:
-                            true_efficiency = int(eff_match.group(1) or eff_match.group(2) or eff_match.group(3))
-                            true_efficiency = max(1, min(10, true_efficiency))
-                        else:
-                            true_efficiency = None
-                        
-                        test_data.append({
-                            'smiles': smiles,
-                            'true_toxicity': true_toxicity,
-                            'true_efficiency': true_efficiency,
-                            'type': 'efficiency'
-                        })
-    
-    return test_data
+    return tox, eff, response
 
 
-def evaluate_checkpoint(base_model_path, checkpoint_path, test_data, output_file):
-    """Evaluate a single checkpoint and save results"""
-    print(f"\nEvaluating checkpoint: {checkpoint_path}")
-    
-    # Load model
-    model, tokenizer = load_checkpoint_model(base_model_path, checkpoint_path)
-    
-    # Predictions
-    pred_toxicity = []
-    pred_efficiency = []
-    true_toxicity = []
-    true_efficiency = []
-    
-    # Evaluate on test data
-    for item in tqdm(test_data, desc="Evaluating"):
-        smiles = item['smiles']
-        true_tox = item['true_toxicity']
-        true_eff = item['true_efficiency']
-        
-        try:
-            pred_tox, pred_eff, _ = predict_toxicity_and_efficiency(model, tokenizer, smiles)
-            
-            pred_toxicity.append(pred_tox)
-            true_toxicity.append(true_tox)
-            
-            if true_eff is not None and pred_eff is not None:
-                pred_efficiency.append(pred_eff)
-                true_efficiency.append(true_eff)
-        except Exception as e:
-            print(f"Error predicting {smiles}: {e}")
-            continue
-    
-    # Calculate metrics
-    results = {
-        'checkpoint': str(checkpoint_path),
-        'step': extract_step_from_checkpoint(checkpoint_path),
-    }
-    
-    # Toxicity accuracy
-    if len(pred_toxicity) > 0:
-        tox_accuracy = accuracy_score(true_toxicity, pred_toxicity)
-        results['toxicity_accuracy'] = float(tox_accuracy)
-        results['toxicity_samples'] = len(pred_toxicity)
-    
-    # Efficiency metrics
-    if len(pred_efficiency) > 0:
-        eff_accuracy = accuracy_score(true_efficiency, pred_efficiency)
-        mae = mean_absolute_error(true_efficiency, pred_efficiency)
-        rmse = np.sqrt(mean_squared_error(true_efficiency, pred_efficiency))
-        
-        # Within ±1 and ±2 accuracy
-        within_1 = np.mean(np.abs(np.array(true_efficiency) - np.array(pred_efficiency)) <= 1)
-        within_2 = np.mean(np.abs(np.array(true_efficiency) - np.array(pred_efficiency)) <= 2)
-        
-        results['efficiency_accuracy'] = float(eff_accuracy)
-        results['efficiency_mae'] = float(mae)
-        results['efficiency_rmse'] = float(rmse)
-        results['efficiency_within_1'] = float(within_1)
-        results['efficiency_within_2'] = float(within_2)
-        results['efficiency_samples'] = len(pred_efficiency)
-    
-    # Save results
-    with open(output_file, 'w') as f:
-        json.dump(results, f, indent=2)
-    
-    print(f"Results saved to: {output_file}")
-    print(f"  Toxicity Accuracy: {results.get('toxicity_accuracy', 'N/A'):.4f}")
-    print(f"  Efficiency Accuracy: {results.get('efficiency_accuracy', 'N/A'):.4f}")
-    print(f"  Efficiency MAE: {results.get('efficiency_mae', 'N/A'):.4f}")
-    
-    # Clean up
-    del model
-    torch.cuda.empty_cache()
-    
-    return results
+# ============================================================
+# Dataset Loaders
+# ============================================================
+def load_efficiency_dataset(efficiency_test_path, limit=200):
+    data = []
+    with open(efficiency_test_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if len(data) >= limit:
+                break
+            j = json.loads(line)
+            msgs = j["messages"]
+            user_msg = msgs[1]["content"]
+            asst_msg = msgs[-1]["content"]
+
+            m = re.search(r':\s*(.*)', user_msg)
+            if not m:
+                continue
+
+            smiles = m.group(1).strip()
+            eff = extract_efficiency(asst_msg)
+            if eff is None:
+                continue
+
+            tox = extract_toxicity(asst_msg)
+
+            data.append({
+                "smiles": smiles,
+                "true_toxicity": 0,
+                "true_efficiency": eff
+            })
+    return data
+
+
+def load_toxic_dataset(toxic_test_path):
+    data = []
+    with open(toxic_test_path, "r", encoding="utf-8") as f:
+        for line in f:
+            item = json.loads(line)
+            msgs = item["messages"]
+            user_msg = msgs[1]["content"]
+            asst_msg = msgs[-1]["content"]
+
+            parts = user_msg.strip().split()
+            smiles = parts[-1].rstrip("?:;,.")  # SMILES last token
+
+            true_tox = extract_toxicity(asst_msg)
+
+            data.append({
+                "smiles": smiles,
+                "true_toxicity": true_tox,
+                "true_efficiency": None
+            })
+    return data
 
 
 def extract_step_from_checkpoint(checkpoint_path):
-    """Extract step number from checkpoint path"""
-    # Checkpoint path format: checkpoint-{step}
-    match = re.search(r'checkpoint-(\d+)', str(checkpoint_path))
-    if match:
-        return int(match.group(1))
-    return None
+    m = re.search(r"checkpoint-(\d+)", str(checkpoint_path))
+    return int(m.group(1)) if m else None
 
 
-def find_all_checkpoints(output_dir):
-    """Find all checkpoint directories"""
-    checkpoints = []
-    output_path = Path(output_dir)
-    
-    if not output_path.exists():
-        return checkpoints
-    
-    for item in output_path.iterdir():
-        if item.is_dir() and 'checkpoint-' in item.name:
-            checkpoints.append(item)
-    
-    # Sort by step number
-    checkpoints.sort(key=lambda x: extract_step_from_checkpoint(x) or 0)
-    
-    return checkpoints
+# ============================================================
+# Evaluate a Single Checkpoint
+# ============================================================
+def evaluate_checkpoint(
+        base_model_path,
+        checkpoint_path,
+        toxic_data,
+        eff_data,
+        output_file
+    ):
+
+    print(f"\nEvaluating checkpoint: {checkpoint_path}")
+
+    model, tokenizer = load_checkpoint_model(base_model_path, checkpoint_path)
+
+    toxic_subset = toxic_data[:200]
+    eff_subset = eff_data[:200]
+
+    print(f"Using {len(toxic_subset)} toxicity samples")
+    print(f"Using {len(eff_subset)} efficiency samples\n")
+
+    tox_true_all, tox_pred_all = [], []
+    eff_true_list, eff_pred_list = [], []
+
+    # =======================================================
+    # Efficiency dataset evaluation
+    # =======================================================
+    print("\n" + "=" * 80)
+    print(" EFFICIENCY DATASET (200 samples) ")
+    print("=" * 80)
+
+    for i, item in enumerate(eff_subset):
+        smiles = item["smiles"]
+        true_tox = item["true_toxicity"]
+        true_eff = item["true_efficiency"]
+
+        pred_tox, pred_eff, response = predict_tox_eff(model, tokenizer, smiles)
+
+        tox_true_all.append(true_tox)
+        tox_pred_all.append(pred_tox)
+
+        if pred_eff is not None:
+            eff_true_list.append(true_eff)
+            eff_pred_list.append(pred_eff)
+
+        print(f"[EFF] {i+1}/200 | SMILES={smiles} | True_Tox={true_tox}, Pred_Tox={pred_tox} "
+              f"| True_Eff={true_eff}, Pred_Eff={pred_eff}")
+
+    # =======================================================
+    # Toxic dataset evaluation
+    # =======================================================
+    print("=" * 80)
+    print(" TOXICITY DATASET (200 samples) ")
+    print("=" * 80)
+
+    for i, item in enumerate(toxic_subset):
+        smiles = item["smiles"]
+        true_tox = item["true_toxicity"]
+
+        pred_tox, pred_eff, response = predict_tox_eff(model, tokenizer, smiles)
+
+        tox_true_all.append(true_tox)
+        tox_pred_all.append(pred_tox)
+
+        print(f"[TOX] {i+1}/200 | SMILES={smiles} | True_Tox={true_tox} | Pred_Tox={pred_tox}")
+
+    # =======================================================
+    # METRICS
+    # =======================================================
+    tox_accuracy = np.mean(np.array(tox_true_all) == np.array(tox_pred_all))
+
+    eff_true = np.array(eff_true_list)
+    eff_pred = np.array(eff_pred_list)
+
+    # NEW: Within ±1 accuracy
+    eff_within1_accuracy = float(np.mean(np.abs(eff_true - eff_pred) <= 1))
+
+    eff_mae = float(mean_absolute_error(eff_true, eff_pred))
+    eff_rmse = float(np.sqrt(mean_squared_error(eff_true, eff_pred)))
+
+    results = {
+        "checkpoint": str(checkpoint_path),
+        "step": extract_step_from_checkpoint(checkpoint_path),
+        "toxicity_accuracy": float(tox_accuracy),
+        "toxicity_samples": len(tox_true_all),
+
+        "efficiency_within1_accuracy": eff_within1_accuracy,
+        "efficiency_mae": eff_mae,
+        "efficiency_rmse": eff_rmse,
+        "efficiency_samples": len(eff_true_list)
+    }
+
+    with open(output_file, "w") as f:
+        json.dump(results, f, indent=2)
+
+    print("\n=== FINAL SUMMARY ===")
+    print(f"Toxicity samples: {len(tox_true_all)}")
+    print(f"Efficiency samples: {len(eff_true_list)}")
+    print(f"Toxicity Accuracy: {tox_accuracy:.4f}")
+    print(f"Efficiency Accuracy (±1): {eff_within1_accuracy:.4f}")
+    print(f"MAE: {eff_mae:.4f}")
+    print(f"RMSE: {eff_rmse:.4f}")
+
+    return results
 
 
+# ============================================================
+# Main
+# ============================================================
 def main():
     import argparse
-    
-    parser = argparse.ArgumentParser(description='Evaluate all checkpoints')
-    parser.add_argument('--config', type=str, default='training_config.yaml',
-                       help='Path to training config file')
-    parser.add_argument('--output_dir', type=str, default=None,
-                       help='Output directory containing checkpoints (overrides config)')
-    parser.add_argument('--results_dir', type=str, default='checkpoint_results',
-                       help='Directory to save evaluation results')
-    
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="training_config.yaml")
     args = parser.parse_args()
-    
-    # Load config
-    with open(args.config, 'r') as f:
-        config = yaml.safe_load(f)
-    
-    base_model_path = config['model']['base_model_path']
-    output_dir = args.output_dir or config['model']['output_dir']
-    toxic_test_path = config['data']['toxic_test_data_path']
-    efficiency_test_path = config['data']['efficiency_test_data_path']
-    
-    # Create results directory
-    results_dir = Path(args.results_dir)
-    results_dir.mkdir(exist_ok=True)
-    
-    # Load test data
-    print("Loading test data...")
-    test_data = load_test_data(toxic_test_path, efficiency_test_path)
-    print(f"Loaded {len(test_data)} test samples")
-    
-    # Find all checkpoints
-    checkpoints = find_all_checkpoints(output_dir)
-    print(f"\nFound {len(checkpoints)} checkpoints")
-    
-    # Evaluate each checkpoint
+
+    config = yaml.safe_load(open(args.config))
+
+    base_model_path = config["model"]["base_model_path"]
+    output_dir = config["model"]["output_dir"]
+    toxic_test_path = config["data"]["toxic_test_data_path"]
+    eff_test_path = config["data"]["efficiency_test_data_path"]
+
+    print("Loading datasets…")
+    toxic_data = load_toxic_dataset(toxic_test_path)
+    eff_data = load_efficiency_dataset(eff_test_path, 200)
+
+    print(f"Loaded toxic samples: {len(toxic_data)}")
+    print(f"Loaded efficiency samples: {len(eff_data)}")
+
+    checkpoints = sorted(
+        [p for p in Path(output_dir).iterdir()
+         if p.is_dir() and "checkpoint-" in p.name],
+        key=lambda x: int(re.search(r"checkpoint-(\d+)", x.name).group(1)),
+        reverse=True
+    )
+
+    Path("checkpoint_results").mkdir(exist_ok=True)
+
     all_results = []
-    for checkpoint in checkpoints:
-        step = extract_step_from_checkpoint(checkpoint)
-        if step is None:
-            continue
-        
-        result_file = results_dir / f"checkpoint-{step}_results.json"
-        
-        if result_file.exists():
-            print(f"\nSkipping checkpoint-{step} (already evaluated)")
-            with open(result_file, 'r') as f:
-                results = json.load(f)
-        else:
-            results = evaluate_checkpoint(
-                base_model_path,
-                checkpoint,
-                test_data,
-                result_file
-            )
-        
-        all_results.append(results)
-    
-    # Save summary
-    summary_file = results_dir / "all_checkpoints_summary.json"
-    with open(summary_file, 'w') as f:
-        json.dump(all_results, f, indent=2)
-    
-    print(f"\n{'='*80}")
-    print("EVALUATION SUMMARY")
-    print(f"{'='*80}")
-    print(f"\nTotal checkpoints evaluated: {len(all_results)}")
-    print(f"\nResults saved to: {summary_file}")
-    print(f"\nIndividual checkpoint results in: {results_dir}")
-    
-    # Print summary table
-    if all_results:
-        print("\nCheckpoint | Step | Tox Acc | Eff Acc | Eff MAE")
-        print("-" * 60)
-        for r in all_results:
-            step = r.get('step', 'N/A')
-            tox_acc = r.get('toxicity_accuracy', 0)
-            eff_acc = r.get('efficiency_accuracy', 0)
-            eff_mae = r.get('efficiency_mae', 0)
-            print(f"{r['checkpoint'].split('/')[-1]:<15} | {step:<5} | {tox_acc:.4f} | {eff_acc:.4f} | {eff_mae:.4f}")
+
+    for ckpt in checkpoints:
+        step = extract_step_from_checkpoint(ckpt)
+        out_file = Path("checkpoint_results") / f"checkpoint-{step}.json"
+
+        res = evaluate_checkpoint(
+            base_model_path,
+            ckpt,
+            toxic_data,
+            eff_data,
+            out_file
+        )
+        all_results.append(res)
+
+    json.dump(all_results, open("checkpoint_results/all_checkpoints_summary.json", "w"), indent=2)
 
 
 if __name__ == "__main__":
