@@ -54,7 +54,7 @@ class PredictorAgent:
         
         self.confidence_calculator = ConfidenceCalculator(score_min, score_max)
     
-    def predict(self, smiles_structure, num_samples=5, temperature=0.2, top_p=0.9, max_length=512):
+    def predict(self, smiles_structure, num_samples=5, temperature=0.2, top_p=0.9, max_length=258):
         """
         Predict toxicity, efficiency, reasoning, and uncertainty for a molecule
         
@@ -72,9 +72,9 @@ class PredictorAgent:
         prompt = f"""Analyze this molecule: {smiles_structure}
 
 Provide:
-1. Predicted molecular score (integer 1 to 10) 
+1. Predicted score (integer 1 to 10) 
 2. Toxicity (1-10, 1 being least toxic and 10 is most toxic)
-3. Detailed reasoning explaining both scores based on molecular structure, functional groups, and known properties.
+3. Detailed reasoning explaining both scores based on molecular structure.
 
 Format your response as:
 Efficiency score: [score]
@@ -110,9 +110,9 @@ Reasoning: [detailed explanation]"""
             with torch.no_grad():
                 generated_ids = self.model.generate(
                     model_inputs.input_ids,
-                    max_new_tokens=max_length,
+                    max_new_tokens=128,
                     do_sample=True,
-                    temperature=0.2,
+                    temperature=0.5,
                     top_p=0.9,
                 )
             
