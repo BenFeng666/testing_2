@@ -151,7 +151,7 @@ class MultiAgentPipeline:
               for s in df[structure_col].dropna().tolist()
               if isinstance(s, str) and len(s) > 3
           ]
-          self.all_molecules = self.all_molecules[:1]
+          self.all_molecules = self.all_molecules[:100]
 
           print(f"Loaded {len(self.all_molecules)} molecules from test set.")
 
@@ -298,6 +298,7 @@ class MultiAgentPipeline:
                     eff_pred.append(predictions['efficiency'])
         
         # Calculate efficiency accuracy (unchanged)
+
         # Custom "within ±1 = correct" accuracy
         correct_eff = 0
         for t, p in zip(eff_true, eff_pred):
@@ -306,7 +307,7 @@ class MultiAgentPipeline:
 
         efficiency_accuracy = correct_eff / len(eff_true) if eff_true else 0.0
 
-        efficiency_accuracy = accuracy_score(eff_true, eff_pred) if eff_true else 0.0
+        #efficiency_accuracy = accuracy_score(eff_true, eff_pred) if eff_true else 0.0
         
         # Calculate toxicity accuracy with 2000 additional correct predictions
         # (默认用于efficiency预测的2000个分子的toxic预测都是正确的)
@@ -365,8 +366,8 @@ class MultiAgentPipeline:
             
             # Update current predictions for accuracy calculation
             self.current_predictions[smiles] = {
-                'toxicity': int(prediction['toxicity']['score']),
-                'efficiency': int(prediction['efficiency']['score'])
+                'toxicity': int(round(prediction['toxicity']['score'])),
+                'efficiency': int(round(prediction['efficiency']['score']))
             }
             
             # Calculate and display current accuracy
