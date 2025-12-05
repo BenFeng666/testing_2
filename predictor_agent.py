@@ -73,18 +73,16 @@ class PredictorAgent:
 
 Provide:
 1. Predicted score (integer 1 to 10) 
-2. Toxicity (1-10, 1 being least toxic and 10 is most toxic)
-3. Detailed reasoning explaining both scores based on molecular structure.
+2. Detailed reasoning explaining both scores based on molecular structure.
 
 Format your response as:
-Efficiency score: [score]
-Toxicity: [score]
+score: [score]
 Reasoning: [detailed explanation]"""
         
         messages = [
             {
                 "role": "system",
-                "content": "You are a helpful assistant specialized in drug discovery and molecular analysis. You can predict molecular scores based on their SMILES structures. Focus on Predicting molecular score"
+                "content": "You are a helpful assistant specialized in drug discovery and molecular analysis. You can predict molecular scores based on their SMILES structures."
             },
             {
                 "role": "user",
@@ -201,12 +199,22 @@ Reasoning: [detailed explanation]"""
                     continue
         
         # Extract efficiency score
+        # Extract efficiency score
         efficiency_patterns = [
             r'[Ee]fficiency[:\s]+(\d+(?:\.\d+)?)',
             r'[Ee]fficient[:\s]+(\d+(?:\.\d+)?)',
             r'[Dd]elivery[:\s]+(\d+(?:\.\d+)?)',
+
+            # NEW: handle "Predicted score (integer 1 to 10) is X"
+            r'[Pp]redicted score.*?\bis\s*(\d+(?:\.\d+)?)',
+
+            # NEW: generic "score is X"
+            r'[Ss]core.*?\bis\s*(\d+(?:\.\d+)?)',
+
+            # OLD: final fallback (loose)
             r'[Ss]core[:\s]+(\d+(?:\.\d+)?)',
         ]
+
         for pattern in efficiency_patterns:
             match = re.search(pattern, response)
             if match:
