@@ -360,15 +360,28 @@ class MultiAgentPipeline:
                 max_length=self.config['prediction']['max_length']
             )
             
-            print(f"  Toxicity: {prediction['toxicity']['score']:.2f} (confidence: {prediction['toxicity']['confidence']:.2f})")
-            print(f"  Efficiency: {prediction['efficiency']['score']:.2f} (confidence: {prediction['efficiency']['confidence']:.2f})")
-            print(f"  Overall Confidence: {prediction['overall_confidence']:.2f}")
+            tox_score = prediction['toxicity']['score'] or 0
+            tox_conf  = prediction['toxicity']['confidence'] or 0
+            eff_score = prediction['efficiency']['score'] or 0
+            eff_conf  = prediction['efficiency']['confidence'] or 0
+
+            print(f"  Toxicity: {tox_score:.2f} (confidence: {tox_conf:.2f})")
+            print(f"  Efficiency: {eff_score:.2f} (confidence: {eff_conf:.2f})")
+            print(f"  Overall Confidence: {prediction['overall_confidence'] or 0:.2f}")
+
             
             # Update current predictions for accuracy calculation
+            tox = prediction['toxicity']['score']
+            eff = prediction['efficiency']['score']
+
+            # fallback if None
+            tox = tox if isinstance(tox, (int, float)) else 0
+            eff = eff if isinstance(eff, (int, float)) else 0
+
             self.current_predictions[smiles] = {
-                'toxicity': int(round(prediction['toxicity']['score'])),
-                'efficiency': int(round(prediction['efficiency']['score']))
-            }
+                'toxicity': int(round(tox)),
+                'efficiency': int(round(eff))
+                      }
             
             # Calculate and display current accuracy
             accuracy_metrics = self.calculate_current_accuracy()
